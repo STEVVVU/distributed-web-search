@@ -32,6 +32,7 @@ if (fs.existsSync(lock)) {
 }
 fs.writeFileSync(lock, JSON.stringify({pid: process.pid}), {flag: 'wx'});
 const stateFile = path.join(root, 'state.json');
+const snapshotFile = path.join(root, 'search-snapshot.json');
 const state = fs.existsSync(stateFile) ? read(stateFile) : {jobs: {}};
 function persist(file, value) {
   try { atomic(file, value); }
@@ -69,8 +70,34 @@ function claim(worker) {
 }
 const server = http.createServer(async (req, res) => {
   try {
+    const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (req.method === 'GET' && pathname === '/') {
+      const html = fs.readFileSync(fileURLToPath(new URL('../web/index.html', import.meta.url)));
+      res.writeHead(200, {'content-type': 'text/html; charset=utf-8'}); res.end(html); return;
+    }
+    if (req.method === 'GET' && pathname === '/api/status') {
+      const snapshot = fs.existsSync(snapshotFile) ? read(snapshotFile) : null;
+      res.writeHead(200, {'content-type': 'application/json'}); res.end(JSON.stringify({ready: Boolean(snapshot), pages: snapshot?.documents.length ?? 0, createdAt: snapshot?.createdAt ?? null})); return;
+    }
+    if (req.method === 'GET' && pathname === '/api/search') {
+      const snapshot = fs.existsSync(snapshotFile) ? read(snapshotFile) : null;
+      ensure(snapshot, 'search index is not ready', 503);
+      const query = new URL(req.url, 'http://localhost').searchParams.get('q') ?? '';
+      const terms = query.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+      const scores = new Map();
+      for (const term of new Set(terms)) for (const posting of snapshot.terms[term] ?? []) {
+        const score = Math.log(1 + snapshot.documents.length / snapshot.terms[term].length) * posting.tf;
+        scores.set(posting.url, (scores.get(posting.url) ?? 0) + score);
+      }
+      const results = [...scores].map(([url, lexical]) => {
+        const doc = snapshot.documents.find(item => item.url === url);
+        const match = doc.text.toLocaleLowerCase().indexOf(terms[0] ?? '');
+        return {...doc, lexical, score: lexical + doc.rank, snippet: doc.text.slice(Math.max(0, match - 70), Math.max(0, match - 70) + 180)};
+      }).sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+      res.writeHead(200, {'content-type': 'application/json'}); res.end(JSON.stringify({query, terms, results})); return;
+    }
     ensure(req.headers.authorization === `Bearer ${process.env.MAPREDUCE_TOKEN}`, 'unauthorized', 401);
-    const parts = new URL(req.url, 'http://localhost').pathname.split('/').filter(Boolean);
+    const parts = pathname.split('/').filter(Boolean);
     let result;
     if (req.method === 'GET' && parts.join('/') === 'health') result = {pid: process.pid, version: 1};
     else if (req.method === 'POST' && parts.join('/') === 'jobs') {
