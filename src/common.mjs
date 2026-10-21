@@ -11,11 +11,18 @@ export function pairs(value) {
   return value;
 }
 export function bucket(key, count) { return createHash('sha256').update(key).digest().readUInt32BE() % count; }
+export function encode(value) {
+  return JSON.stringify(value, (_key, item) => {
+    ensure(typeof item !== 'number' || Number.isFinite(item), 'nonfinite JSON number');
+    return item;
+  });
+}
 export function atomic(file, value) {
+  const serialized = encode(value);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   const temp = `${file}.${randomUUID()}.tmp`;
   const fd = fs.openSync(temp, 'wx');
-  try { fs.writeFileSync(fd, JSON.stringify(value)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  try { fs.writeFileSync(fd, serialized); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   fs.renameSync(temp, file);
 }
 export function read(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -26,10 +33,10 @@ export async function body(req) {
     ensure(size <= LIMIT, 'request exceeds 4 MiB', 413);
     chunks.push(chunk);
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { fail('invalid JSON'); }
+  try { const value = JSON.parse(Buffer.concat(chunks).toString()); encode(value); return value; } catch { fail('invalid JSON'); }
 }
 export async function rpc(url, token, method = 'GET', value) {
-  const res = await fetch(url, {method, headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'}, body: value === undefined ? undefined : JSON.stringify(value), signal: AbortSignal.timeout(5000)});
+  const res = await fetch(url, {method, headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'}, body: value === undefined ? undefined : encode(value), signal: AbortSignal.timeout(5000)});
   const data = await res.json();
   if (!res.ok) throw Object.assign(new Error(data.error), {status: res.status});
   return data;

@@ -3,7 +3,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
-import {atomic, read, rpc, sleep} from '../src/common.mjs';
+import {atomic, encode, read, rpc, sleep} from '../src/common.mjs';
 
 const run = path.resolve('.runs', new Date().toISOString().replaceAll(':', '-'));
 fs.mkdirSync(run, {recursive: true});
@@ -56,12 +56,16 @@ async function compare(module, keys, expected) {
   evidence.checks.push({case: module, id: job.id, output: job.output}); return job;
 }
 try {
+  assert.throws(() => encode({nested: [Infinity]}), /nonfinite/);
+  assert.throws(() => encode({nested: [NaN]}), /nonfinite/);
   await startCoordinator();
   await assert.rejects(rpc(`${url}/health`, 'incorrect'), e => e.status === 401);
   await assert.rejects(call('/jobs', 'POST', {module: '../bad', keys: []}), e => e.status === 400);
   await assert.rejects(call('/jobs', 'POST', {module: 'wordcount', keys: [[7, 'bad']]}), e => e.status === 400);
   await assert.rejects(call('/jobs', 'POST', null), e => e.status === 400);
   await assert.rejects(call('/claim', 'POST', null), e => e.status === 400);
+  const nonfinite = await fetch(`${url}/jobs`, {method:'POST', headers:{authorization:`Bearer ${token}`}, body:'{"module":"wordcount","keys":[["x",1e400]]}'});
+  assert.equal(nonfinite.status, 400, 'nonfinite JSON input must not be persisted as null');
   await assert.rejects(call('/jobs/__proto__'), e => e.status === 404);
   const competitor = launch('src/coordinator.mjs', ['--data', path.join(run, 'coordinator'), '--port', '0'], 'competing-coordinator');
   const competingExit = await new Promise(resolve => competitor.once('exit', resolve)); assert.notEqual(competingExit, 0);
@@ -100,6 +104,19 @@ try {
   const restartWorker = worker('restart-worker');
   const old = await until(async () => { const j = await call(`/jobs/${restartId}`); return j.tasks.find(t => t.status === 'running'); }, 'restart lease');
   await stop(coordinator); evidence.actions.push({killedCoordinator: coordinator.pid, old});
+  const contenders = Array.from({length:4}, (_, i) => launch('src/coordinator.mjs', ['--data', path.join(run, 'coordinator'), '--port', '0'], `recovery-contender-${i}`));
+  const outcomes = await Promise.all(contenders.map(child => new Promise((resolve, reject) => {
+    let text = '';
+    child.stdout.on('data', chunk => {
+      text += chunk;
+      try { if (JSON.parse(text.split('\n')[0]).ready) resolve({ready:true, pid:child.pid}); } catch {}
+    });
+    child.once('exit', code => resolve({ready:false, pid:child.pid, code}));
+    setTimeout(() => reject(new Error('recovery contender readiness timeout')), 5000).unref();
+  })));
+  assert.equal(outcomes.filter(item => item.ready).length, 1, 'simultaneous recovery must have exactly one coordinator');
+  evidence.checks.push({case:'concurrent recovery has one owner', outcomes});
+  for (const child of contenders) await stop(child);
   await startCoordinator();
   await assert.rejects(call(`/jobs/${restartId}/complete`, 'POST', {phase: 'map', index: old.index, token: old.token, output: []}), e => e.status === 409);
   const restartPeer = worker('restart-peer');

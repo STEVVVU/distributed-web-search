@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import {randomUUID} from 'node:crypto';
+import net from 'node:net';
+import {createHash, randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {atomic, body, config, ensure, pairs, read, bucket} from './common.mjs';
 
@@ -10,6 +11,17 @@ const port = Number(options.port ?? 8080), leaseMs = Number(options.lease ?? 100
 ensure(Number.isInteger(port) && port >= 0 && port <= 65535, 'invalid port');
 ensure(Number.isInteger(leaseMs) && leaseMs >= 100 && leaseMs <= 600000, 'lease must be 100..600000 ms');
 fs.mkdirSync(root, {recursive: true});
+ensure(['win32', 'linux'].includes(process.platform), 'coordinator ownership requires Windows or Linux');
+const canonicalRoot = fs.realpathSync.native(root);
+const identity = process.platform === 'win32' ? canonicalRoot.toLowerCase() : canonicalRoot;
+const ownerName = `mapreduce-${createHash('sha256').update(identity).digest('hex')}`;
+const ownerEndpoint = process.platform === 'win32' ? `\\\\?\\pipe\\${ownerName}` : `\0${ownerName}`;
+const ownerGuard = net.createServer(socket => socket.destroy());
+await new Promise((resolve, reject) => {
+  ownerGuard.once('error', reject);
+  ownerGuard.listen(ownerEndpoint, () => { ownerGuard.off('error', reject); resolve(); });
+});
+ownerGuard.on('error', error => { console.error('Coordinator ownership failed', error); process.exit(1); });
 const lock = path.join(root, 'owner.json');
 if (fs.existsSync(lock)) {
   const owner = read(lock);

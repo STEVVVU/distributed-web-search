@@ -6,7 +6,7 @@ This is an original educational implementation informed by Brown's distributed p
 
 ## Run
 
-Use Node 25+; there are no packages to install, cloud accounts, external datasets or GPU requirements.
+Use Node 25+ on Windows or Linux; there are no packages to install, cloud accounts, external datasets or GPU requirements.
 
 ```powershell
 npm run check
@@ -65,7 +65,7 @@ Bundled jobs demonstrate word count, maximum temperature per station (including 
 | Fencing and idempotence | Completion must match current phase, task, token and unexpired lease. An accepted token replay acknowledges without a second publication. Obsolete tokens receive HTTP 409. |
 | Coordinator restart extension | Persisted running tasks reset to pending before the server listens. A new lease always gets a new UUID; pre-restart completions cannot publish. Accepted tasks and final results are retained. |
 
-The coordinator serializes mutations in one event loop. It writes a temporary JSON file, flushes it and renames it before publishing the state reference. Attempts and final output are written before the state snapshot referencing them. A crash before a state commit may leave unused files, which recovery ignores; a crash after commit retains the accepted attempt. Persistence errors stop the coordinator rather than serving mutated, uncommitted state. There is one coordinator per data directory, guarded by an exclusive PID owner file; startup refuses a live owner and reclaims a dead process's file.
+The coordinator serializes mutations in one event loop. It writes a temporary JSON file, flushes it and renames it before publishing the state reference. Attempts and final output are written before the state snapshot referencing them. A crash before a state commit may leave unused files, which recovery ignores; a crash after commit retains the accepted attempt. Persistence errors stop the coordinator rather than serving mutated, uncommitted state. There is one coordinator per canonical data directory. An OS-owned IPC endpoint serializes startup before any PID-file reclamation. Windows uses a named pipe and Linux uses an abstract Unix socket; the OS releases ownership when the process exits. The PID file remains diagnostic metadata and a compatibility check for older coordinators. Simultaneous restart verification launches four contenders and requires exactly one owner.
 
 ## API and limits
 
@@ -81,7 +81,7 @@ All routes require `Authorization: Bearer <MAPREDUCE_TOKEN>`, with a token of at
 | `GET /jobs/:id/shuffle/:map/:partition` | Accepted map bucket, after map barrier |
 | `POST /jobs/:id/complete` | `{phase,index,token,output}` or `{phase,index,token,error}` |
 
-Input keys are strings of at most 4096 characters. Each pair list allows at most 100,000 records, each request body at most 4 MiB, and split/reducer counts are 1–64. HTTP calls time out after 5 seconds; server request/header timeouts are 10 seconds. Default task leases are 10 seconds, configurable from 100 ms to 10 minutes. There are no heartbeats: a task must finish within its lease. A trusted module that blocks a worker indefinitely cannot block coordinator reassignment, but its original worker process must be stopped by its owner. Retry limits do not cancel JavaScript already executing.
+JSON numbers must be finite. The shared encoder validates numbers before HTTP serialization and persistence, and incoming JSON is checked before any state change. Input keys are strings of at most 4096 characters. Each pair list allows at most 100,000 records, each request body at most 4 MiB, and split/reducer counts are 1–64. HTTP calls time out after 5 seconds; server request/header timeouts are 10 seconds. Default task leases are 10 seconds, configurable from 100 ms to 10 minutes. There are no heartbeats: a task must finish within its lease. A trusted module that blocks a worker indefinitely cannot block coordinator reassignment, but its original worker process must be stopped by its owner. Retry limits do not cancel JavaScript already executing.
 
 This local prototype keeps coordinator metadata and all accepted shuffle data on one disk. It demonstrates distributed execution and network shuffle on one host, not distributed storage replication or multi-host deployment. Memory use is bounded per request, not across accumulated jobs: reduce groups, JSON artifacts and job metadata are materialized in memory. There is no garbage collector, streaming spill, combiner, speculative scheduling, iterative API, fairness guarantee, admission control or replicated coordinator. Keep local workloads small and retain storage deliberately. Failed job inputs and orphan temporary/attempt files remain for diagnosis.
 
@@ -105,3 +105,5 @@ The driver records actions and assertions in `.runs/<timestamp>/evidence.json`, 
 - Jeffrey Dean and Sanjay Ghemawat, [MapReduce: Simplified Data Processing on Large Clusters, OSDI 2004](https://research.google/pubs/mapreduce-simplified-data-processing-on-large-clusters/) ([paper](https://storage.googleapis.com/gweb-research2023-media/pubtools/4449.pdf)), sections 3.1–3.3, ground partition scheduling, task re-execution and atomic output publication. Persistent coordinator restart and explicit attempt fencing are this project's extension; the paper's implementation aborts on master failure while discussing checkpoint recovery as an alternative.
 
 Original source is MIT licensed. Sources are attributed as conceptual references; no source code from the course stencil or student repositories is included.
+
+The ownership mechanism uses the standard Node [IPC API](https://nodejs.org/download/release/v24.21.0/docs/api/net.html#ipc-support). Linux abstract sockets and Windows named pipes avoid stale filesystem socket deletion races.
