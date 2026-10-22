@@ -1,5 +1,7 @@
 # Distributed web search
 
+The reproducible [owned-graph benchmark plan](docs/benchmark-plan.md) covers corpus/worker/rate scaling, repeated samples, exact correctness, synthetic relevance and retained resource evidence. Run `node tools/benchmark-search.mjs --smoke` before the full command. Performance results remain pending an isolated measured campaign. The builder retains its32-page default; validated `SEARCH_MAX_PAGES` (1..5000), `SEARCH_MAX_DEPTH` (0..16), partition and deadline settings are documented in that plan. Crawl origin, URL, per-page byte/time and RPC limits remain enforced.
+
 A local educational search engine built on the existing MIT MapReduce runtime. Separate Node worker processes fetch a bounded synthetic HTML graph, build an inverted index, and calculate PageRank through repeated distributed MapReduce jobs. The coordinator keeps accepted job outputs and the completed search snapshot on disk. This is a single-host, multi-process course adaptation; it makes no scale, cloud deployment, or Brown grader compatibility claim.
 
 ![Search results with lexical and PageRank scores](docs/images/search-desktop.png)

@@ -16,6 +16,7 @@ jobs:
           node-version: 25
       - run: npm ci
       - run: npm run check
+      - run: node tools/test-search-build-config.mjs
       - run: npm test
       - run: npm run verify
         timeout-minutes: 4

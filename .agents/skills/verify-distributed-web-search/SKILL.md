@@ -17,6 +17,10 @@ Browser checks are performed only through CUA. Launch `npm run dev`, inspect des
 `npm run verify` also runs `tools/verify-ui.mjs`, a deterministic Node VM unit harness consuming the actual inline UI script with a minimal public DOM surface and deferred HTTP responses. It reproduces and prevents stale query/policy responses mixing into newer results, including late failures. It checks current HTTP failures versus successful empty results. This is unit evidence, not a browser or end-to-end claim.
 
 # Evidence
+
+## Benchmark extension
+
+Run `node tools/benchmark-search.mjs --smoke` for the real process lifecycle, exact eight-page posting/rank/query oracle and restart/cleanup. Follow `docs/benchmark-plan.md` and manual `.github/workflows/benchmark.yml` for the frozen32/1,000/5,000-page and worker/rate sweep, five repeats, stability, raw resource evidence and separate profile. Generated run data remains in `.runs/`. Only owned synthetic term relevance is established, not human web relevance. `tools/test-search-build-config.mjs` covers the validated builder settings.
 `.runs/search-<timestamp>/evidence.json` stores `passed`, cleanup status, actions, rejection reasons, job/task ownership and assertions. Coordinator durable state and the persisted `search-snapshot.json` are retained alongside logs. Failed runs keep `passed:false` plus the error stack. The final evidence is read back after cleanup.
 
 # Cleanup

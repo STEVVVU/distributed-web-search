@@ -2,6 +2,7 @@
 
 | Feature | Real path | Evidence |
 | --- | --- | --- |
+| Owned-graph scaling | `tools/benchmark-search.mjs` → actual bounded builder/coordinator/workers and HTTP query API | frozen five-repeat corpus/worker/rate matrix, exact full postings and independent rank/order oracle, synthetic relevance, process telemetry, restart and cleanup; `--smoke` proves the lifecycle without a performance claim |
 | Bounded distributed crawl | fixture HTTP server → `tools/build-index.mjs` → `crawl-page` MapReduce job → durable coordinator accepted outputs | driver checks five-page graph/text oracle, duplicate/fragment/off-origin/invalid links, malformed HTML, dangling page, both workers; negative jobs reject failed/redirect/oversized/slow/non-HTML pages while preserving snapshot |
 | Complete inverted index | `index-document` MapReduce jobs → complete snapshot term set | driver checks every posting field and exact term-set equality, with no extra terms |
 | Global and topic-focused PageRank | repeated `rank-contribution` MapReduce jobs → two persisted rank profiles | independent dense transition matrix checks every rank, convergence, dangling redistribution, nonuniformity and topic bias beyond two iterations |
