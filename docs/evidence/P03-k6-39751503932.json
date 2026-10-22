@@ -1,0 +1,50 @@
+{
+  "run": "39751503932",
+  "source": "64aa42ff6e2b46037df3137d20da849d0d6d30df",
+  "workflow": "https://github.com/STEVVVU/distributed-web-search/actions/runs/39751503932",
+  "artifactBytes": 14367958,
+  "result": "measurement-complete-zero-loss-at-offered-rates",
+  "environment": {
+    "os": "Ubuntu 7.0.0-1017-azure",
+    "node": "25.9.0",
+    "k6": "2.3.0",
+    "availableCpus": 4,
+    "memoryGiB": 16,
+    "cpu": "AMD EPYC 9V45"
+  },
+  "buildTimer": "Builder launch through atomic snapshot publication, including crawl, PageRank, indexing, and process startup.",
+  "buildRepeats": 5,
+  "buildCells": [
+    {"pages":32,"workers":1,"medianSeconds":49.79,"rangeSeconds":[48.09,53.50],"medianDerivedPagesPerSecond":0.64},
+    {"pages":32,"workers":2,"medianSeconds":44.76,"rangeSeconds":[42.98,47.93],"medianDerivedPagesPerSecond":0.71},
+    {"pages":32,"workers":4,"medianSeconds":40.64,"rangeSeconds":[39.38,47.52],"medianDerivedPagesPerSecond":0.79},
+    {"pages":1000,"workers":1,"medianSeconds":53.67,"rangeSeconds":[52.34,56.12],"medianDerivedPagesPerSecond":18.63},
+    {"pages":1000,"workers":2,"medianSeconds":45.85,"rangeSeconds":[42.57,51.12],"medianDerivedPagesPerSecond":21.81},
+    {"pages":1000,"workers":4,"medianSeconds":40.55,"rangeSeconds":[39.04,42.35],"medianDerivedPagesPerSecond":24.66},
+    {"pages":5000,"workers":1,"medianSeconds":63.93,"rangeSeconds":[61.82,66.56],"medianDerivedPagesPerSecond":78.21},
+    {"pages":5000,"workers":2,"medianSeconds":53.67,"rangeSeconds":[51.75,56.08],"medianDerivedPagesPerSecond":93.16},
+    {"pages":5000,"workers":4,"medianSeconds":48.00,"rangeSeconds":[46.62,55.49],"medianDerivedPagesPerSecond":104.17}
+  ],
+  "loadRunsPerRate": 45,
+  "maxTenSecondGeneratorCpuSeconds": 4.22,
+  "maxCoordinatorRssMiB": 304.5,
+  "load": [
+    {"offeredPerSecond":1,"offered":490,"completed":490,"dropped":0,"rejected":0,"failed":0,"timedOut":0,"integrityErrors":0,"interrupted":0,"maxGeneratorRssMiB":131.4,"medianPerRunP95Milliseconds":2.692,"perRunP95RangeMilliseconds":[0.514,19.417],"medianPerRunP99Milliseconds":2.706,"perRunP99RangeMilliseconds":[0.522,23.891]},
+    {"offeredPerSecond":10,"offered":4532,"completed":4532,"dropped":0,"rejected":0,"failed":0,"timedOut":0,"integrityErrors":0,"interrupted":0,"maxGeneratorRssMiB":173.1,"medianPerRunP95Milliseconds":2.246,"perRunP95RangeMilliseconds":[0.462,11.254],"medianPerRunP99Milliseconds":2.919,"perRunP99RangeMilliseconds":[0.564,17.360]},
+    {"offeredPerSecond":100,"offered":45037,"completed":45037,"dropped":0,"rejected":0,"failed":0,"timedOut":0,"integrityErrors":0,"interrupted":0,"maxGeneratorRssMiB":194.8,"medianPerRunP95Milliseconds":1.491,"perRunP95RangeMilliseconds":[0.256,8.128],"medianPerRunP99Milliseconds":2.172,"perRunP99RangeMilliseconds":[0.425,16.260]}
+  ],
+  "sustained": {"pages":1000,"workers":2,"offeredPerSecond":10,"seconds":120,"offered":1200,"completed":1200,"dropped":0,"rejected":0,"failed":0,"timedOut":0,"integrityErrors":0,"interrupted":0,"correctOutputs":true,"cleanup":true},
+  "verification": {"allBuildSamplesPassed":true,"allOutputsMatchedIndependentOracle":true,"allRequestsFinished":true,"zeroLossEnvelope":true,"restartPassed":true,"cleanupPassed":true,"k6ContractValidWrongHashChangedBodyPassed":true},
+  "evidenceSha256": {
+    "fullCampaignEvidenceJson": "D591D3271BC274B9EB27D33561160A87C4E3E6294A5DA284A23B6B691D567A9D",
+    "smokeEvidenceJson": "8A81734FDED54BC2C038F763B5C50479E01E259789064F12C589CA00F2F69A9D",
+    "k6ContractEvidenceJson": "5D1D98385C4C025B0E3E1EE19C5BF95655DE5F687320C5663B42D2E599D1CDCB"
+  },
+  "limits": [
+    "The synthetic graph runs on one host and does not establish arbitrary-web capacity or human relevance.",
+    "http_req_duration excludes connection setup and dropped offers; it is not scheduled-to-completion latency.",
+    "Per-run quantile summaries are grouped across different graph sizes and worker counts, not pooled request percentiles.",
+    "The 280000-page, 360-documents-per-second, and 118-millisecond goals remain unproven.",
+    "The earlier generator-OOM run 39740791329 is preserved and excluded as primary performance evidence."
+  ]
+}
