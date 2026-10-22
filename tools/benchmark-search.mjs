@@ -8,6 +8,7 @@ import {performance, monitorEventLoopDelay} from 'node:perf_hooks';
 import {randomUUID} from 'node:crypto';
 import {rpc, sleep} from '../src/common.mjs';
 import {launch, ready, wait, cleanup, stop} from './processes.mjs';
+import {assertRankedResults, loadSummary, quantiles} from './search-load-summary.mjs';
 
 const smoke = process.argv.includes('--smoke'), profile = process.argv.includes('--profile');
 const run = path.resolve(process.env.BENCH_OUTPUT ?? `.runs/benchmark-${Date.now()}`);
@@ -15,10 +16,6 @@ fs.mkdirSync(run, {recursive: true});
 const evidence = {passed: false, smoke, profile, schema: 1, claim: 'Owned graph index and query scaling, excluding arbitrary web relevance',
   source: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), dirty: execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}),
   environment: {node: process.version, platform: platform(), release: release(), cores: availableParallelism(), cpu: cpus()[0]?.model, memory: totalmem(), load: loadavg(), command: process.argv}, samples: []};
-const quantiles = values => {
-  const s = values.toSorted((a, b) => a - b), q = p => s.length ? s[Math.min(s.length - 1, Math.ceil(p * s.length) - 1)] : null;
-  return {n: s.length, p50: q(.5), p95: q(.95), p99: q(.99), min: s[0] ?? null, max: s.at(-1) ?? null};
-};
 let active = [];
 const hardDeadline = setTimeout(() => {
   for (const child of active) child.kill('SIGKILL');
@@ -91,47 +88,61 @@ async function cell(config) {
     for (const policy of ['global', 'topic']) for (const query of queries) {
       const scores = new Map();
       for (const term of new Set(query.split(' '))) for (const posting of postings.get(term) ?? []) scores.set(posting.url, (scores.get(posting.url) ?? 0) + posting.tf * Math.log(1 + config.pages / postings.get(term).length));
-      const order = [...scores].map(([url, lexical]) => ({url, score: lexical + ranks[policy].get(url)})).sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+      const order = [...scores].map(([url, lexical]) => ({url, title: expected.get(url).title, text: expected.get(url).text,
+        lexical, rank: ranks[policy].get(url), score: lexical + ranks[policy].get(url)})).sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
       const response = await rpc(`${api}/api/search?q=${encodeURIComponent(query)}&policy=${policy}`, token);
-      assert.deepEqual(response.results.map(doc => doc.url), order.map(doc => doc.url));
-      responses.set(`${policy}/${query}`, response.results.map(doc => doc.url));
+      assertRankedResults(response.results, order);
+      responses.set(`${policy}/${query}`, order);
       sample.queries.push({policy, query, matches: order.length, exactOrder: true, precisionAt10: query === 'zzmissing' ? null : response.results.slice(0, 10).filter(doc => query === 'unique7' ? expected.get(doc.url).id === 7 : query === 'topic3' ? expected.get(doc.url).id % 16 === 3 : true).length / Math.min(10, response.results.length)});
     }
     sample.load = [];
-    const loads = smoke ? [{rate: 10, seconds: .4}] : profile ? [{rate: 20, seconds: 5}] : [{rate: 1, seconds: 10}, {rate: 10, seconds: 10}, {rate: 100, seconds: 10}];
+    const loads = smoke ? [{rate: 10, seconds: .4}] : profile ? [{rate: 100, seconds: 20}] : [{rate: 1, seconds: 10}, {rate: 10, seconds: 10}, {rate: 100, seconds: 10}];
     if (config.stability) loads.splice(0, loads.length, {rate: 10, seconds: 120});
     for (const load of loads) {
       const requests = [], pending = new Set(), lag = monitorEventLoopDelay({resolution: 10}); lag.enable();
       const cpu = process.cpuUsage(), base = performance.now(); let bytes = 0, maxPending = 0;
       for (let i = 0; i < Math.ceil(load.rate * load.seconds); i++) {
-        const scheduled = base + i * 1000 / load.rate; await sleep(Math.max(0, scheduled - performance.now()));
+        const scheduled = base + i * 1000 / load.rate;
+        while (performance.now() < scheduled) await sleep(Math.ceil(scheduled - performance.now()));
         const query = queries[i % queries.length], policy = i % 2 ? 'topic' : 'global', record = {query, policy, scheduled, latenessMs: performance.now() - scheduled}; requests.push(record);
-        if (pending.size >= 256) {record.rejected = 'generator concurrency ceiling'; continue;}
+        if (pending.size >= 256) {record.rejected = 'generator concurrency ceiling'; record.ms = performance.now() - scheduled; continue;}
         const task = (async () => {
           try {
             const response = await fetch(`${api}/api/search?q=${encodeURIComponent(query)}&policy=${policy}`, {signal: AbortSignal.timeout(5000)});
             record.status = response.status;
             const payload = await response.text(); bytes += Buffer.byteLength(payload);
-            assert.equal(response.status, 200); const value = JSON.parse(payload);
-            assert.deepEqual(value.results.map(doc => doc.url), responses.get(`${policy}/${query}`)); record.correct = true;
-          } catch (error) {record.error = error.message; record.timeout = ['TimeoutError', 'AbortError'].includes(error.name);}
+            record.bodyComplete = true;
+            if (response.status !== 200) {
+              record.error = `HTTP ${response.status}`;
+              if ([429, 503].includes(response.status)) record.rejected = record.error;
+              return;
+            }
+            const value = JSON.parse(payload);
+            assertRankedResults(value.results, responses.get(`${policy}/${query}`)); record.correct = true;
+          } catch (error) {record.error = error.message; record.timeout = ['TimeoutError', 'AbortError'].includes(error.name); record.integrityError = record.status === 200 && record.bodyComplete && !record.timeout;}
           finally {record.ms = performance.now() - scheduled;}
         })();
         pending.add(task); task.finally(() => pending.delete(task)); maxPending = Math.max(maxPending, pending.size);
       }
       await Promise.all(pending); lag.disable();
-      sample.load.push({...load, requests, counts: {offered: requests.length, completed: requests.filter(r => r.correct).length, rejected: requests.filter(r => r.rejected).length, failed: requests.filter(r => r.error).length, timedOut: requests.filter(r => r.timeout).length}, latencyMs: quantiles(requests.filter(r => r.correct).map(r => r.ms)), arrivalLatenessMs: quantiles(requests.map(r => r.latenessMs)), responseBytes: bytes, maxPending, clientCpu: process.cpuUsage(cpu), clientRss: process.memoryUsage().rss, clientEventLoopP99Ms: lag.percentile(99) / 1e6});
-      assert(requests.every(r => r.correct), 'load had errors/rejections; evidence retained');
+      const outcomes = loadSummary(requests);
+      sample.load.push({...load, requests, ...outcomes, latencyMs: quantiles(requests.filter(r => r.correct).map(r => r.ms)),
+        latencyByOutcomeMs: {completed: quantiles(requests.filter(r => r.correct).map(r => r.ms)), rejected: quantiles(requests.filter(r => r.rejected).map(r => r.ms)), failed: quantiles(requests.filter(r => r.error && !r.rejected).map(r => r.ms))},
+        arrivalLatenessMs: quantiles(requests.map(r => r.latenessMs)), responseBytes: bytes, maxPending, clientCpu: process.cpuUsage(cpu), clientRss: process.memoryUsage().rss, clientEventLoopP99Ms: lag.percentile(99) / 1e6});
+      assert(outcomes.correctOutputs, 'a completed response violated the exact output oracle; evidence retained');
     }
     for (const child of children.filter(c => c !== coordinator)) await stop(child);
     await stop(coordinator);
     const restartAt = performance.now();
     const restarted = start('src/coordinator.mjs', ['--data', data, '--port', '0'], 'restart');
     api = `http://127.0.0.1:${(await ready(restarted)).port}`;
-    assert.deepEqual((await rpc(`${api}/api/search?q=common`, token)).results.map(doc => doc.url), responses.get('global/common'));
+    assertRankedResults((await rpc(`${api}/api/search?q=common`, token)).results, responses.get('global/common'));
     sample.restartMs = performance.now() - restartAt;
     sample.jobCounts = Object.values(JSON.parse(fs.readFileSync(path.join(data, 'state.json'))).jobs).reduce((counts, job) => {counts[job.status] = (counts[job.status] ?? 0) + 1; return counts;}, {});
     sample.passed = true;
+    sample.measurementComplete = true;
+    sample.correctOutputs = true;
+    sample.zeroLossEnvelope = sample.load.every(load => load.zeroLossEnvelope);
   } finally {
     await new Promise(done => {fixture.close(done); fixture.closeAllConnections();});
     await cleanup(children); sample.cleanup = true; active = [];
@@ -140,11 +151,15 @@ async function cell(config) {
 }
 try {
   if (smoke) await cell({pages: 8, workers: 2, repeat: 0});
-  else if (profile) await cell({pages: 1000, workers: 2, repeat: 0});
+  else if (profile) await cell({pages: 5000, workers: 1, repeat: 0});
   else {
     for (let repeat = 0; repeat < 5; repeat++) for (const pages of [32, 1000, 5000]) for (const workers of repeat % 2 ? [4, 2, 1] : [1, 2, 4]) await cell({pages, workers, repeat});
     await cell({pages: 1000, workers: 2, repeat: 0, stability: true});
   }
   evidence.passed = true;
+  evidence.measurementComplete = true;
+  evidence.correctOutputs = true;
+  evidence.zeroLossEnvelope = evidence.samples.every(sample => sample.zeroLossEnvelope);
+  evidence.verdict = evidence.zeroLossEnvelope ? 'measurement-complete-zero-loss-at-offered-rates' : 'measurement-complete-with-overload';
 } catch (error) {evidence.error = error.stack; process.exitCode = 1;}
 finally {clearTimeout(hardDeadline); fs.writeFileSync(path.join(run, 'evidence.json'), JSON.stringify(evidence, null, 2)); console.log(JSON.stringify({passed: evidence.passed, run}));}

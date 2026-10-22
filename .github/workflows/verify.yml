@@ -17,6 +17,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: node tools/test-search-build-config.mjs
+      - run: node tools/test-search-load-summary.mjs
       - run: npm test
       - run: npm run verify
         timeout-minutes: 4

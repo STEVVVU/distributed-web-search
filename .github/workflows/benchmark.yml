@@ -1,6 +1,12 @@
 name: Owned search scaling benchmark
 on:
   workflow_dispatch:
+    inputs:
+      stage:
+        type: choice
+        options: [benchmark, profile]
+        default: benchmark
+        description: Full repeated matrix or separate failed-workload CPU profile
 permissions:
   contents: read
 jobs:
@@ -15,13 +21,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node tools/test-search-build-config.mjs
+      - run: node tools/test-search-load-summary.mjs
       - run: node tools/benchmark-search.mjs --smoke
       - run: node tools/benchmark-search.mjs
+        if: inputs.stage == 'benchmark'
       - run: node tools/benchmark-search.mjs --profile
+        if: inputs.stage == 'profile'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: search-benchmark-${{ github.sha }}
+          name: search-${{ inputs.stage }}-${{ github.sha }}
           path: .runs/benchmark-*/
           include-hidden-files: true
           retention-days: 14
