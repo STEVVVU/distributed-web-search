@@ -16,6 +16,8 @@ Browser checks are performed only through CUA. Launch `npm run dev`, inspect des
 
 `npm run verify` also runs `tools/verify-ui.mjs`, a deterministic Node VM unit harness consuming the actual inline UI script with a minimal public DOM surface and deferred HTTP responses. It reproduces and prevents stale query/policy responses mixing into newer results, including late failures. It checks current HTTP failures versus successful empty results. This is unit evidence, not a browser or end-to-end claim.
 
+`npm run verify` additionally runs `tools/test-search-snapshot.mjs`, a small real-coordinator protocol regression. Status/search share one parsed snapshot and URL map per native file identity. The driver atomically replaces equal-length content with preserved mtime, confirms both policies see new first-match data, removes/recreates the snapshot, verifies corruption fails visibly before and after restart, and confirms repair/valid restart. It retains `.runs/snapshot-contract-*/evidence.json` and owned cleanup. It does not run a corpus build or establish performance.
+
 # Evidence
 
 ## Benchmark extension

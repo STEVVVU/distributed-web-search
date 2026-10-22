@@ -2,6 +2,8 @@
 
 The [owned-graph benchmark plan](docs/benchmark-plan.md) keeps the real Node crawl/rank/index/oracle lifecycle and uses pinned k6v2.3.0 for HTTP constant-arrival-rate load and native metrics. With k6 on PATH, run `node tools/benchmark-search.mjs --smoke` first. k6 request duration excludes unsent iterations and is not scheduled-to-completion latency; drops, failures and correctness remain separate. Performance results await a complete repeated campaign. The manual workflow selects `benchmark` or a separate5,000-page `profile`. The builder retains its32-page default and documented bounded settings/security limits.
 
+Status and search reuse one parsed snapshot and URL lookup map while its file identity is unchanged. An atomic replacement reloads both together; removal or corruption remains visible. This avoids repeated snapshot parsing and document scans without caching query answers or changing published results. Same-length replacement, removal/recreation and corrupt/valid restart checks run through the real service in `node tools/test-search-snapshot.mjs` and `npm run verify`. Performance comparisons remain pending matched hosted measurements.
+
 A local educational search engine built on the existing MIT MapReduce runtime. Separate Node worker processes fetch a bounded synthetic HTML graph, build an inverted index, and calculate PageRank through repeated distributed MapReduce jobs. The coordinator keeps accepted job outputs and the completed search snapshot on disk. This is a single-host, multi-process course adaptation; it makes no scale, cloud deployment, or Brown grader compatibility claim.
 
 ![Search results with lexical and PageRank scores](docs/images/search-desktop.png)

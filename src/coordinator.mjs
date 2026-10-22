@@ -33,6 +33,17 @@ if (fs.existsSync(lock)) {
 fs.writeFileSync(lock, JSON.stringify({pid: process.pid}), {flag: 'wx'});
 const stateFile = path.join(root, 'state.json');
 const snapshotFile = path.join(root, 'search-snapshot.json');
+let snapshotCache;
+function searchSnapshot() {
+  const stat = fs.statSync(snapshotFile, {bigint: true, throwIfNoEntry: false});
+  if (!stat) { snapshotCache = undefined; return null; }
+  const identity = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+  if (snapshotCache?.identity === identity) return snapshotCache;
+  snapshotCache = undefined;
+  const snapshot = read(snapshotFile), documents = new Map();
+  for (const doc of snapshot.documents) if (!documents.has(doc.url)) documents.set(doc.url, doc);
+  return snapshotCache = {identity, snapshot, documents};
+}
 const state = fs.existsSync(stateFile) ? read(stateFile) : {jobs: {}};
 function persist(file, value) {
   try { atomic(file, value); }
@@ -76,12 +87,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {'content-type': 'text/html; charset=utf-8'}); res.end(html); return;
     }
     if (req.method === 'GET' && pathname === '/api/status') {
-      const snapshot = fs.existsSync(snapshotFile) ? read(snapshotFile) : null;
+      const snapshot = searchSnapshot()?.snapshot;
       res.writeHead(200, {'content-type': 'application/json'}); res.end(JSON.stringify({ready: Boolean(snapshot), pages: snapshot?.documents.length ?? 0, createdAt: snapshot?.createdAt ?? null})); return;
     }
     if (req.method === 'GET' && pathname === '/api/search') {
-      const snapshot = fs.existsSync(snapshotFile) ? read(snapshotFile) : null;
-      ensure(snapshot, 'search index is not ready', 503);
+      const cached = searchSnapshot();
+      ensure(cached, 'search index is not ready', 503);
+      const {snapshot, documents} = cached;
       const params = new URL(req.url, 'http://localhost').searchParams;
       const query = params.get('q') ?? '', policy = params.get('policy') ?? 'global';
       ensure(query.length <= 512, 'query exceeds 512 characters');
@@ -94,7 +106,7 @@ const server = http.createServer(async (req, res) => {
         scores.set(posting.url, (scores.get(posting.url) ?? 0) + score);
       }
       const results = [...scores].map(([url, lexical]) => {
-        const doc = snapshot.documents.find(item => item.url === url);
+        const doc = documents.get(url);
         const match = doc.text.toLocaleLowerCase().indexOf(terms[0] ?? '');
         const rank = policy === 'global' ? doc.rank : doc.ranks?.topic;
         ensure(Number.isFinite(rank), 'ranking policy unavailable; rebuild index', 503);
