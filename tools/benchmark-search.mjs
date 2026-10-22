@@ -4,21 +4,32 @@ import path from 'node:path';
 import http from 'node:http';
 import {execFileSync} from 'node:child_process';
 import {availableParallelism, cpus, totalmem, platform, release, loadavg} from 'node:os';
-import {performance, monitorEventLoopDelay} from 'node:perf_hooks';
+import {performance} from 'node:perf_hooks';
 import {randomUUID} from 'node:crypto';
-import {rpc, sleep} from '../src/common.mjs';
+import {rpc} from '../src/common.mjs';
 import {launch, ready, wait, cleanup, stop} from './processes.mjs';
-import {assertRankedResults, loadSummary, quantiles} from './search-load-summary.mjs';
+import {assertRankedResults, k6Counts} from './search-load-summary.mjs';
 
 const smoke = process.argv.includes('--smoke'), profile = process.argv.includes('--profile');
 const run = path.resolve(process.env.BENCH_OUTPUT ?? `.runs/benchmark-${Date.now()}`);
 fs.mkdirSync(run, {recursive: true});
+const k6Binary = process.env.K6_BINARY ?? 'k6';
+const k6Version = execFileSync(k6Binary, ['version'], {encoding: 'utf8'}).trim();
+assert(/^k6(?:\.exe)? v2\.3\.0\b/.test(k6Version), 'the frozen benchmark requires verified k6 v2.3.0');
 const evidence = {passed: false, smoke, profile, schema: 1, claim: 'Owned graph index and query scaling, excluding arbitrary web relevance',
   source: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(), dirty: execFileSync('git', ['status', '--porcelain'], {encoding: 'utf8'}),
-  environment: {node: process.version, platform: platform(), release: release(), cores: availableParallelism(), cpu: cpus()[0]?.model, memory: totalmem(), load: loadavg(), command: process.argv}, samples: []};
+  environment: {node: process.version, k6: k6Version, platform: platform(), release: release(), cores: availableParallelism(), cpu: cpus()[0]?.model, memory: totalmem(), load: loadavg(), command: process.argv}, samples: []};
 let active = [];
 const hardDeadline = setTimeout(() => {
-  for (const child of active) child.kill('SIGKILL');
+  for (const child of active) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    try {
+      if (child.ownedProcessGroup) process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
+    } catch (error) {
+      if (error.code !== 'ESRCH') fs.appendFileSync(path.join(run, 'deadline-cleanup-error.txt'), error.stack + '\n');
+    }
+  }
   fs.writeFileSync(path.join(run, 'deadline.txt'), '270 minute campaign deadline'); process.exit(1);
 }, 270 * 60_000);
 
@@ -88,48 +99,51 @@ async function cell(config) {
     for (const policy of ['global', 'topic']) for (const query of queries) {
       const scores = new Map();
       for (const term of new Set(query.split(' '))) for (const posting of postings.get(term) ?? []) scores.set(posting.url, (scores.get(posting.url) ?? 0) + posting.tf * Math.log(1 + config.pages / postings.get(term).length));
-      const order = [...scores].map(([url, lexical]) => ({url, title: expected.get(url).title, text: expected.get(url).text,
-        lexical, rank: ranks[policy].get(url), score: lexical + ranks[policy].get(url)})).sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+      const order = [...scores].map(([url, lexical]) => {
+        const doc = expected.get(url), match = doc.text.toLowerCase().indexOf(query.split(' ')[0]);
+        const start = Math.max(0, match - 70);
+        return {url, title: doc.title, text: doc.text, links: doc.links,
+          ranks: {global: ranks.global.get(url), topic: ranks.topic.get(url)}, rank: ranks[policy].get(url),
+          lexical, score: lexical + ranks[policy].get(url), snippet: doc.text.slice(start, start + 180)};
+      }).sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
       const response = await rpc(`${api}/api/search?q=${encodeURIComponent(query)}&policy=${policy}`, token);
       assertRankedResults(response.results, order);
       responses.set(`${policy}/${query}`, order);
       sample.queries.push({policy, query, matches: order.length, exactOrder: true, precisionAt10: query === 'zzmissing' ? null : response.results.slice(0, 10).filter(doc => query === 'unique7' ? expected.get(doc.url).id === 7 : query === 'topic3' ? expected.get(doc.url).id % 16 === 3 : true).length / Math.min(10, response.results.length)});
     }
+    const oracleFile = path.join(directory, 'independent-query-oracle.json');
+    fs.writeFileSync(oracleFile, JSON.stringify(Array.from({length: 10}, (_, i) => {
+      const query = queries[i % queries.length], policy = i % 2 ? 'topic' : 'global';
+      return {query, terms: query.split(' '), policy, results: responses.get(`${policy}/${query}`)};
+    })));
     sample.load = [];
-    const loads = smoke ? [{rate: 10, seconds: .4}] : profile ? [{rate: 100, seconds: 20}] : [{rate: 1, seconds: 10}, {rate: 10, seconds: 10}, {rate: 100, seconds: 10}];
+    const loads = smoke ? [{rate: 10, seconds: 1}] : profile ? [{rate: 100, seconds: 20}] : [{rate: 1, seconds: 10}, {rate: 10, seconds: 10}, {rate: 100, seconds: 10}];
     if (config.stability) loads.splice(0, loads.length, {rate: 10, seconds: 120});
     for (const load of loads) {
-      const requests = [], pending = new Set(), lag = monitorEventLoopDelay({resolution: 10}); lag.enable();
-      const cpu = process.cpuUsage(), base = performance.now(); let bytes = 0, maxPending = 0;
-      for (let i = 0; i < Math.ceil(load.rate * load.seconds); i++) {
-        const scheduled = base + i * 1000 / load.rate;
-        while (performance.now() < scheduled) await sleep(Math.ceil(scheduled - performance.now()));
-        const query = queries[i % queries.length], policy = i % 2 ? 'topic' : 'global', record = {query, policy, scheduled, latenessMs: performance.now() - scheduled}; requests.push(record);
-        if (pending.size >= 256) {record.rejected = 'generator concurrency ceiling'; record.ms = performance.now() - scheduled; continue;}
-        const task = (async () => {
-          try {
-            const response = await fetch(`${api}/api/search?q=${encodeURIComponent(query)}&policy=${policy}`, {signal: AbortSignal.timeout(5000)});
-            record.status = response.status;
-            const payload = await response.text(); bytes += Buffer.byteLength(payload);
-            record.bodyComplete = true;
-            if (response.status !== 200) {
-              record.error = `HTTP ${response.status}`;
-              if ([429, 503].includes(response.status)) record.rejected = record.error;
-              return;
-            }
-            const value = JSON.parse(payload);
-            assertRankedResults(value.results, responses.get(`${policy}/${query}`)); record.correct = true;
-          } catch (error) {record.error = error.message; record.timeout = ['TimeoutError', 'AbortError'].includes(error.name); record.integrityError = record.status === 200 && record.bodyComplete && !record.timeout;}
-          finally {record.ms = performance.now() - scheduled;}
-        })();
-        pending.add(task); task.finally(() => pending.delete(task)); maxPending = Math.max(maxPending, pending.size);
+      const tag = `k6-${load.rate}-${load.seconds}`, summaryFile = path.join(directory, `${tag}-summary.json`), usageFile = path.join(directory, `${tag}.usage`);
+      const args = ['run', '--quiet', '--no-usage-report', '--out', `json=${path.join(directory, `${tag}-raw.json.gz`)}`, path.resolve('tools/k6-search.js')];
+      const nativeTime = process.platform === 'linux';
+      const command = nativeTime ? ['-f', '%M %U %S', '-o', usageFile, k6Binary, ...args] : args;
+      const child = launch(directory, command[0], command.slice(1), tag,
+        {SEARCH_API: api, SEARCH_RATE: String(load.rate), SEARCH_SECONDS: String(load.seconds), SEARCH_ORACLE: oracleFile, SEARCH_SUMMARY: summaryFile},
+        {executable: nativeTime ? '/usr/bin/time' : k6Binary, detached: nativeTime});
+      children.push(child);
+      const outcome = await wait(child, (load.seconds + 30) * 1000);
+      assert(fs.existsSync(summaryFile), `k6 did not write a summary; inspect ${tag}.log`);
+      const summary = JSON.parse(fs.readFileSync(summaryFile));
+      const counts = k6Counts(summary);
+      assert(counts.offered > 0 && counts.started > 0, 'k6 must execute real offered requests');
+      const result = {...load, driver: 'k6-v2.3.0', maxVUs: 256, counts, summary: path.basename(summaryFile),
+        raw: `${tag}-raw.json.gz`, measurementComplete: outcome.code === 0,
+        correctOutputs: counts.integrityErrors === 0, zeroLossEnvelope: counts.offered === counts.completed,
+        timingBoundary: 'k6 http_req_duration is sending+waiting+receiving for issued requests; it excludes connection/setup and dropped iterations, not scheduled-to-completion latency'};
+      if (nativeTime) {
+        const fields = fs.readFileSync(usageFile, 'utf8').trim().split('\n').at(-1).split(/\s+/);
+        result.generator = {peakRssKiB: Number(fields[0]), userCpuSeconds: Number(fields[1]), systemCpuSeconds: Number(fields[2])};
       }
-      await Promise.all(pending); lag.disable();
-      const outcomes = loadSummary(requests);
-      sample.load.push({...load, requests, ...outcomes, latencyMs: quantiles(requests.filter(r => r.correct).map(r => r.ms)),
-        latencyByOutcomeMs: {completed: quantiles(requests.filter(r => r.correct).map(r => r.ms)), rejected: quantiles(requests.filter(r => r.rejected).map(r => r.ms)), failed: quantiles(requests.filter(r => r.error && !r.rejected).map(r => r.ms))},
-        arrivalLatenessMs: quantiles(requests.map(r => r.latenessMs)), responseBytes: bytes, maxPending, clientCpu: process.cpuUsage(cpu), clientRss: process.memoryUsage().rss, clientEventLoopP99Ms: lag.percentile(99) / 1e6});
-      assert(outcomes.correctOutputs, 'a completed response violated the exact output oracle; evidence retained');
+      sample.load.push(result);
+      assert(result.correctOutputs, 'a completed response violated the independent output oracle; k6 evidence retained');
+      assert.equal(outcome.code, 0, 'k6 failed; inspect its retained summary/log/raw metrics');
     }
     for (const child of children.filter(c => c !== coordinator)) await stop(child);
     await stop(coordinator);

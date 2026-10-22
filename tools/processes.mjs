@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 
-export function launch(run, script, args, name, env = {}) {
+export function launch(run, script, args, name, env = {}, {executable = process.execPath, detached = false} = {}) {
   const log = fs.createWriteStream(path.join(run, `${name}.log`), {flags: 'a'});
-  const child = spawn(process.execPath, [script, ...args], {env: {...process.env, ...env}, stdio: ['ignore', 'pipe', 'pipe']});
+  const child = spawn(executable, [script, ...args], {env: {...process.env, ...env}, stdio: ['ignore', 'pipe', 'pipe'], detached, windowsHide: true});
+  child.ownedProcessGroup = detached;
   child.stdout.pipe(log, {end: false}); child.stderr.pipe(log, {end: false});
   child.output = ''; child.stdout.on('data', chunk => { child.output += chunk; });
   child.finished = new Promise(resolve => {
@@ -42,7 +43,8 @@ export async function ready(child) {
 }
 export async function stop(child) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  if (!child.kill('SIGTERM')) throw new Error(`could not terminate owned child ${child.pid}`);
+  if (child.ownedProcessGroup) process.kill(-child.pid, 'SIGTERM');
+  else if (!child.kill('SIGTERM')) throw new Error(`could not terminate owned child ${child.pid}`);
   await wait(child, 5000);
 }
 export async function cleanup(children) {

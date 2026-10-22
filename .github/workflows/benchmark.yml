@@ -20,6 +20,11 @@ jobs:
           node-version: 25
           cache: npm
       - run: npm ci
+      - uses: grafana/setup-k6-action@43b9fc21641a76002687994433dd586f56e791b1
+        with:
+          k6-version: '2.3.0'
+          browser: false
+      - run: k6 version
       - run: node tools/test-search-build-config.mjs
       - run: node tools/test-search-load-summary.mjs
       - run: node tools/benchmark-search.mjs --smoke

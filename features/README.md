@@ -2,7 +2,7 @@
 
 | Feature | Real path | Evidence |
 | --- | --- | --- |
-| Owned-graph scaling | `tools/benchmark-search.mjs` → actual bounded builder/coordinator/workers and HTTP query API | frozen five-repeat corpus/worker/rate matrix, exact full postings and independent rank/order oracle, synthetic relevance, process telemetry, restart and cleanup; `--smoke` proves the lifecycle without a performance claim |
+| Owned-graph scaling | `tools/benchmark-search.mjs` → actual bounded builder/coordinator/workers; `tools/k6-search.js` → HTTP query API | Node retains exact posting/rank/all-field oracle and process lifecycle; pinned k6 constant-arrival-rate/fixed256VUs/native JSON metrics preserve drops/timeouts/failures; issued request duration excludes dropped offers; five-repeat matrix, synthetic relevance, resources, restart/cleanup and smoke remain distinct |
 | Bounded distributed crawl | fixture HTTP server → `tools/build-index.mjs` → `crawl-page` MapReduce job → durable coordinator accepted outputs | driver checks five-page graph/text oracle, duplicate/fragment/off-origin/invalid links, malformed HTML, dangling page, both workers; negative jobs reject failed/redirect/oversized/slow/non-HTML pages while preserving snapshot |
 | Complete inverted index | `index-document` MapReduce jobs → complete snapshot term set | driver checks every posting field and exact term-set equality, with no extra terms |
 | Global and topic-focused PageRank | repeated `rank-contribution` MapReduce jobs → two persisted rank profiles | independent dense transition matrix checks every rank, convergence, dangling redistribution, nonuniformity and topic bias beyond two iterations |
