@@ -12,9 +12,11 @@ function nodes(root, name, out = []) {
 }
 export async function map(url) {
   const origin = process.env.FIXTURE_ORIGIN;
-  if (!origin || new URL(url).origin !== origin) throw new Error('URL outside configured fixture origin');
+  const target = new URL(url);
+  if (!origin || target.origin !== origin || target.username || target.password || url.length > 2048) throw new Error('URL outside configured fixture origin or URL bounds');
   const response = await fetch(url, {redirect: 'error', signal: AbortSignal.timeout(2000)});
   if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  if (!response.headers.get('content-type')?.toLowerCase().startsWith('text/html')) throw new Error(`expected HTML for ${url}`);
   const reader = response.body.getReader(), chunks = []; let size = 0;
   try {
     for (;;) {
@@ -32,7 +34,7 @@ export async function map(url) {
     if (!href) return [];
     try {
       const target = new URL(href, url); target.hash = '';
-      if (target.origin !== origin || !['http:', 'https:'].includes(target.protocol)) return [];
+      if (target.origin !== origin || !['http:', 'https:'].includes(target.protocol) || target.username || target.password || target.href.length > 2048) return [];
       return [target.href];
     } catch { return []; }
   });

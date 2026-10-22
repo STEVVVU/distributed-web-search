@@ -82,19 +82,25 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/search') {
       const snapshot = fs.existsSync(snapshotFile) ? read(snapshotFile) : null;
       ensure(snapshot, 'search index is not ready', 503);
-      const query = new URL(req.url, 'http://localhost').searchParams.get('q') ?? '';
+      const params = new URL(req.url, 'http://localhost').searchParams;
+      const query = params.get('q') ?? '', policy = params.get('policy') ?? 'global';
+      ensure(query.length <= 512, 'query exceeds 512 characters');
+      ensure(['global', 'topic'].includes(policy), 'unknown ranking policy');
       const terms = query.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+      ensure(new Set(terms).size <= 16, 'query exceeds 16 distinct terms');
       const scores = new Map();
-      for (const term of new Set(terms)) for (const posting of snapshot.terms[term] ?? []) {
+      for (const term of new Set(terms)) for (const posting of Object.hasOwn(snapshot.terms, term) ? snapshot.terms[term] : []) {
         const score = Math.log(1 + snapshot.documents.length / snapshot.terms[term].length) * posting.tf;
         scores.set(posting.url, (scores.get(posting.url) ?? 0) + score);
       }
       const results = [...scores].map(([url, lexical]) => {
         const doc = snapshot.documents.find(item => item.url === url);
         const match = doc.text.toLocaleLowerCase().indexOf(terms[0] ?? '');
-        return {...doc, lexical, score: lexical + doc.rank, snippet: doc.text.slice(Math.max(0, match - 70), Math.max(0, match - 70) + 180)};
+        const rank = policy === 'global' ? doc.rank : doc.ranks?.topic;
+        ensure(Number.isFinite(rank), 'ranking policy unavailable; rebuild index', 503);
+        return {...doc, rank, lexical, score: lexical + rank, snippet: doc.text.slice(Math.max(0, match - 70), Math.max(0, match - 70) + 180)};
       }).sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
-      res.writeHead(200, {'content-type': 'application/json'}); res.end(JSON.stringify({query, terms, results})); return;
+      res.writeHead(200, {'content-type': 'application/json'}); res.end(JSON.stringify({query, terms, policy, results})); return;
     }
     ensure(req.headers.authorization === `Bearer ${process.env.MAPREDUCE_TOKEN}`, 'unauthorized', 401);
     const parts = pathname.split('/').filter(Boolean);

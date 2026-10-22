@@ -1,0 +1,9 @@
+# Search interface reference
+
+Inspected on 2026-10-21. Source is [DuckDuckGo organic search results](https://duckduckgo.com/?q=distributed+systems&ia=web). Inspo was searched first; its available marketing pages did not fit this search task. The main agent inspected the live results page and selected only its search header and organic result components. The executor inspected the retained screenshot before implementation.
+
+Reference screenshot is `C:/Users/steve/.codex/orchestrate/coursework30-20261021/evidence/P03/reference/duckduckgo-results.png`. At the main agent's 1280 × 720 browser viewport, the body is rgb(24,24,24). The search pill starts at x94/y21, measures 676 × 40, uses approximately #333 and radius22. The header divider is y104. The filter row is near y127. Organic results start at x110 with width628. The source row has a 32px circular mark. Title links are 22px/26.4px and rgb(173,194,252). Snippets use 14px text with approximately20px line height and #ddd. Secondary metadata uses muted gray. Results are borderless.
+
+The implementation reproduces those selected components at the matching desktop viewport. It uses the plain project identity, a neutral D mark, system Arial/Helvetica, an actual ranking-policy selector, index readiness, and numeric score metadata. It omits unsupported vendor tabs, advertising, generated answers, vendor settings, sidebar cards, proprietary branding, and proprietary fonts. Real fixture content determines wrapping and result height; vendor content and site icons are not copied. Narrow screens preserve readable widths and wrap the toolbar.
+
+Acceptance remains the main agent's CUA-only comparison of desktop and narrow screenshots, both ranking policies, empty search, prototype-word search, and unavailable-index rendering. Do not claim pixel parity for vendor features outside the selected component scope.

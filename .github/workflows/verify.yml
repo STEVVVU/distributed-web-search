@@ -8,14 +8,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 25
+      - run: npm ci
       - run: npm run check
       - run: npm test
+      - run: npm run verify
+        timeout-minutes: 4
+      - run: npm audit --audit-level=low
       - uses: actions/upload-artifact@v4
         if: always()
         with:
