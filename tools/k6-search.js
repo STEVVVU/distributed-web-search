@@ -2,7 +2,7 @@ import http from 'k6/http';
 import exec from 'k6/execution';
 import {SharedArray} from 'k6/data';
 import {Counter, Trend} from 'k6/metrics';
-import {sameSearchOutput} from './search-output-oracle.mjs';
+import crypto from 'k6/crypto';
 
 const cases = new SharedArray('independent-search-oracle', () => JSON.parse(open(__ENV.SEARCH_ORACLE)));
 const started = new Counter('search_started');
@@ -40,8 +40,7 @@ export default function () {
   if (response.status !== 200 || response.error) {
     failed.add(1); failedDuration.add(response.timings.duration); return;
   }
-  let correct = false;
-  try { correct = sameSearchOutput(response.json(), expected); } catch (_) { correct = false; }
+  const correct = crypto.sha256(response.body, 'hex') === expected.sha256;
   if (!correct) {
     mismatches.add(1); failed.add(1); failedDuration.add(response.timings.duration);
     console.error(`Independent search oracle mismatch for ${expected.policy}/${expected.query}`);

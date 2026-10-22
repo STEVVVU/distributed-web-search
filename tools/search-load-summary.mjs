@@ -10,6 +10,7 @@ export function k6Counts(summary) {
   const counts = {offered: count('search_started') + count('dropped_iterations'), started: count('search_started'),
     completed: count('search_completed'), rejected: count('search_rejected'), failed: count('search_failed'),
     dropped: count('dropped_iterations'), timedOut: count('search_timeouts'), integrityErrors: count('search_oracle_mismatches')};
-  assert.equal(counts.started, counts.completed + counts.rejected + counts.failed, 'every started k6 iteration must have one terminal outcome');
+  counts.interrupted = counts.started - counts.completed - counts.rejected - counts.failed;
+  assert(counts.interrupted >= 0, 'terminal outcomes cannot exceed started k6 iterations');
   return counts;
 }

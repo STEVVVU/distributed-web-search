@@ -27,6 +27,7 @@ jobs:
       - run: k6 version
       - run: node tools/test-search-build-config.mjs
       - run: node tools/test-search-load-summary.mjs
+      - run: node tools/test-search-k6.mjs
       - run: node tools/benchmark-search.mjs --smoke
       - run: node tools/benchmark-search.mjs
         if: inputs.stage == 'benchmark'
@@ -36,6 +37,8 @@ jobs:
         if: always()
         with:
           name: search-${{ inputs.stage }}-${{ github.sha }}
-          path: .runs/benchmark-*/
+          path: |
+            .runs/benchmark-*/
+            .runs/k6-contract-*/
           include-hidden-files: true
           retention-days: 14

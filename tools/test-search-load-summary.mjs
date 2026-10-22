@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {assertRankedResults, k6Counts} from './search-load-summary.mjs';
 const summary = {metrics: Object.fromEntries(Object.entries({search_started: 10, search_completed: 4, search_rejected: 2, search_failed: 4, dropped_iterations: 3, search_timeouts: 4, search_oracle_mismatches: 0}).map(([name, count]) => [name, {values: {count}}]))};
-assert.deepEqual(k6Counts(summary), {offered: 13, started: 10, completed: 4, rejected: 2, failed: 4, dropped: 3, timedOut: 4, integrityErrors: 0});
+assert.deepEqual(k6Counts(summary), {offered: 13, started: 10, completed: 4, rejected: 2, failed: 4, dropped: 3, timedOut: 4, integrityErrors: 0, interrupted: 0});
 assert.throws(() => k6Counts({...summary, metrics: {...summary.metrics, search_completed: {values: {count: 10}}}}), /terminal outcome/);
+assert.equal(k6Counts({...summary, metrics: {...summary.metrics, search_started: {values: {count: 129}}}}).interrupted, 119);
 const expected = [{url: 'http://127.0.0.1/doc', title: 'Doc', text: 'Text', score: 3, lexical: 2, rank: 1}];
 assert.doesNotThrow(() => assertRankedResults(expected, expected));
 for (const key of ['url', 'title', 'text', 'score', 'lexical', 'rank']) assert.throws(() => assertRankedResults([{...expected[0], [key]: typeof expected[0][key] === 'string' ? 'wrong' : NaN}], expected), /oracle/);

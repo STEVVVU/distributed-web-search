@@ -5,7 +5,7 @@ import http from 'node:http';
 import {execFileSync} from 'node:child_process';
 import {availableParallelism, cpus, totalmem, platform, release, loadavg} from 'node:os';
 import {performance} from 'node:perf_hooks';
-import {randomUUID} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {rpc} from '../src/common.mjs';
 import {launch, ready, wait, cleanup, stop} from './processes.mjs';
 import {assertRankedResults, k6Counts} from './search-load-summary.mjs';
@@ -68,6 +68,7 @@ async function cell(config) {
     sample.build = JSON.parse(fs.readFileSync(path.join(directory, 'builder.log'), 'utf8').trim().split('\n').at(-1));
     const snapshotFile = path.join(data, 'search-snapshot.json'), snapshot = JSON.parse(fs.readFileSync(snapshotFile));
     sample.snapshotBytes = fs.statSync(snapshotFile).size;
+    sample.snapshotSha256 = createHash('sha256').update(fs.readFileSync(snapshotFile)).digest('hex');
     assert.equal(snapshot.documents.length, config.pages);
     const expected = new Map();
     for (let id = 0; id < config.pages; id++) {
@@ -95,7 +96,7 @@ async function cell(config) {
       for (const doc of snapshot.documents) assert(Math.abs(doc.ranks[policy] - vector.get(doc.url)) < 2e-10, 'independent rank mismatch');
     }
     const queries = ['unique7', 'topic3', 'common', 'benchmark common', 'zzmissing'];
-    const responses = new Map();
+    const responses = new Map(), bodyHashes = new Map();
     for (const policy of ['global', 'topic']) for (const query of queries) {
       const scores = new Map();
       for (const term of new Set(query.split(' '))) for (const posting of postings.get(term) ?? []) scores.set(posting.url, (scores.get(posting.url) ?? 0) + posting.tf * Math.log(1 + config.pages / postings.get(term).length));
@@ -106,15 +107,20 @@ async function cell(config) {
           ranks: {global: ranks.global.get(url), topic: ranks.topic.get(url)}, rank: ranks[policy].get(url),
           lexical, score: lexical + ranks[policy].get(url), snippet: doc.text.slice(start, start + 180)};
       }).sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
-      const response = await rpc(`${api}/api/search?q=${encodeURIComponent(query)}&policy=${policy}`, token);
-      assertRankedResults(response.results, order);
+      const issued = await fetch(`${api}/api/search?q=${encodeURIComponent(query)}&policy=${policy}`, {signal: AbortSignal.timeout(5000)});
+      assert.equal(issued.status, 200);
+      const rawBody = await issued.text(), response = JSON.parse(rawBody);
+      assertRankedResults(response, {query, terms: query.split(' '), policy, results: order});
+      bodyHashes.set(`${policy}/${query}`, createHash('sha256').update(rawBody).digest('hex'));
       responses.set(`${policy}/${query}`, order);
-      sample.queries.push({policy, query, matches: order.length, exactOrder: true, precisionAt10: query === 'zzmissing' ? null : response.results.slice(0, 10).filter(doc => query === 'unique7' ? expected.get(doc.url).id === 7 : query === 'topic3' ? expected.get(doc.url).id % 16 === 3 : true).length / Math.min(10, response.results.length)});
+      sample.queries.push({policy, query, matches: order.length, exactOrder: true, exactFields: true,
+        validatedBodySha256: bodyHashes.get(`${policy}/${query}`),
+        precisionAt10: query === 'zzmissing' ? null : response.results.slice(0, 10).filter(doc => query === 'unique7' ? expected.get(doc.url).id === 7 : query === 'topic3' ? expected.get(doc.url).id % 16 === 3 : true).length / Math.min(10, response.results.length)});
     }
     const oracleFile = path.join(directory, 'independent-query-oracle.json');
     fs.writeFileSync(oracleFile, JSON.stringify(Array.from({length: 10}, (_, i) => {
       const query = queries[i % queries.length], policy = i % 2 ? 'topic' : 'global';
-      return {query, terms: query.split(' '), policy, results: responses.get(`${policy}/${query}`)};
+      return {query, policy, sha256: bodyHashes.get(`${policy}/${query}`)};
     })));
     sample.load = [];
     const loads = smoke ? [{rate: 10, seconds: 1}] : profile ? [{rate: 100, seconds: 20}] : [{rate: 1, seconds: 10}, {rate: 10, seconds: 10}, {rate: 100, seconds: 10}];
@@ -135,7 +141,8 @@ async function cell(config) {
       assert(counts.offered > 0 && counts.started > 0, 'k6 must execute real offered requests');
       const result = {...load, driver: 'k6-v2.3.0', maxVUs: 256, counts, summary: path.basename(summaryFile),
         raw: `${tag}-raw.json.gz`, measurementComplete: outcome.code === 0,
-        correctOutputs: counts.integrityErrors === 0, zeroLossEnvelope: counts.offered === counts.completed,
+        correctOutputs: counts.integrityErrors === 0, requestsFullyFinished: counts.interrupted === 0,
+        zeroLossEnvelope: counts.offered === counts.completed,
         timingBoundary: 'k6 http_req_duration is sending+waiting+receiving for issued requests; it excludes connection/setup and dropped iterations, not scheduled-to-completion latency'};
       if (nativeTime) {
         const fields = fs.readFileSync(usageFile, 'utf8').trim().split('\n').at(-1).split(/\s+/);
@@ -145,6 +152,7 @@ async function cell(config) {
       assert(result.correctOutputs, 'a completed response violated the independent output oracle; k6 evidence retained');
       assert.equal(outcome.code, 0, 'k6 failed; inspect its retained summary/log/raw metrics');
     }
+    assert.equal(createHash('sha256').update(fs.readFileSync(snapshotFile)).digest('hex'), sample.snapshotSha256, 'snapshot changed during immutable trial');
     for (const child of children.filter(c => c !== coordinator)) await stop(child);
     await stop(coordinator);
     const restartAt = performance.now();
@@ -156,6 +164,7 @@ async function cell(config) {
     sample.passed = true;
     sample.measurementComplete = true;
     sample.correctOutputs = true;
+    sample.requestsFullyFinished = sample.load.every(load => load.requestsFullyFinished);
     sample.zeroLossEnvelope = sample.load.every(load => load.zeroLossEnvelope);
   } finally {
     await new Promise(done => {fixture.close(done); fixture.closeAllConnections();});
@@ -173,6 +182,7 @@ try {
   evidence.passed = true;
   evidence.measurementComplete = true;
   evidence.correctOutputs = true;
+  evidence.requestsFullyFinished = evidence.samples.every(sample => sample.requestsFullyFinished);
   evidence.zeroLossEnvelope = evidence.samples.every(sample => sample.zeroLossEnvelope);
   evidence.verdict = evidence.zeroLossEnvelope ? 'measurement-complete-zero-loss-at-offered-rates' : 'measurement-complete-with-overload';
 } catch (error) {evidence.error = error.stack; process.exitCode = 1;}
