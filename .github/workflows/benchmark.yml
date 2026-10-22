@@ -38,7 +38,20 @@ jobs:
         with:
           name: search-${{ inputs.stage }}-${{ github.sha }}
           path: |
-            .runs/benchmark-*/
-            .runs/k6-contract-*/
+            .runs/benchmark-*/evidence.json
+            .runs/benchmark-*/deadline*.txt
+            .runs/benchmark-*/sample-*/sample.json
+            .runs/benchmark-*/sample-*/*.log
+            .runs/benchmark-*/sample-*/*-resource.jsonl
+            .runs/benchmark-*/sample-*/*-summary.json
+            .runs/benchmark-*/sample-*/*-raw.json.gz
+            .runs/benchmark-*/sample-*/*-oracle.json
+            .runs/benchmark-*/sample-*/*.usage
+            .runs/benchmark-*/sample-*/*.cpuprofile
+            .runs/k6-contract-*/evidence.json
+            .runs/k6-contract-*/*.log
+            .runs/k6-contract-*/*-summary.json
+            .runs/k6-contract-*/*-raw.json.gz
+            .runs/k6-contract-*/*-oracle.json
           include-hidden-files: true
           retention-days: 14
