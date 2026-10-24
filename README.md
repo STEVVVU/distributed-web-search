@@ -1,5 +1,13 @@
 # Distributed web search
 
+## Guide
+
+- [Architecture and execution guide](#architecture-and-execution-guide)
+- [Run](#run)
+- [How it works](#how-it-works)
+- [API and limits](#api-and-limits)
+- [Sources and limits](#sources-and-limits)
+
 The [owned-graph benchmark plan](docs/benchmark-plan.md) keeps the real Node crawl, rank, index and oracle lifecycle. It uses pinned k6v2.3.0 for HTTP constant-arrival-rate load and native metrics. The completed [October 2026 results](docs/benchmark-results-20261022.md) report five hosted repeats for graphs of 32, 1,000 and 5,000 pages with 1, 2 and 4 workers, plus load at 1, 10 and 100 queries per second. The run passed exact output checks and finished every request without drops or failures. These results describe a synthetic graph on one host. They do not establish arbitrary-web capacity or human relevance. k6 request duration excludes unsent iterations and is not scheduled-to-completion latency. The manual workflow selects `benchmark` or a separate 5,000-page `profile`. The builder retains its 32-page default and documented bounded settings and security limits.
 
 Status and search reuse one parsed snapshot and URL lookup map while its file identity is unchanged. An atomic replacement reloads both together; removal or corruption remains visible. This avoids repeated snapshot parsing and document scans without caching query answers or changing published results. Same-length replacement, removal/recreation and corrupt/valid restart checks run through the real service in `node tools/test-search-snapshot.mjs` and `npm run verify`. A matched performance comparison for this cache change remains pending.
@@ -67,3 +75,131 @@ The source runtime remains MIT licensed. Its base commit is `a4f0f61ab5649b96b71
 - [parse5](https://github.com/inikulin/parse5) is MIT-licensed and installed at exact version 8.0.1. It parses HTML5 using the WHATWG parsing algorithm. It is a runtime dependency, pinned in `package-lock.json`.
 
 This is a small synthetic graph demonstration. The crawl intentionally cannot access arbitrary Internet URLs. Coordinator data, shuffle and snapshots reside on one disk, memory use grows with the graph and jobs are materialized in memory. No multi-host deployment, replication, throughput or scalability claim is made. Brown staff have not evaluated it.
+
+## Architecture and execution guide
+
+This project adds a bounded synthetic-web crawl, inverted index, two PageRank policies, snapshot publication, and a search UI on the existing MIT MapReduce runtime. The runtime owns job scheduling, worker leases, durable task output, and recovery. This is not a general web crawler or multi-host service. The [snapshot](#snapshot) is the committed input to search.
+
+The builder submits named jobs to one coordinator; separate workers run them and persist artifacts. The coordinator serves queries over the completed snapshot.
+
+```mermaid
+flowchart LR
+  Builder["Index builder"] --> Coordinator["MapReduce coordinator"]
+  Coordinator <--> WorkerA["Worker process A"]
+  Coordinator <--> WorkerB["Worker process B"]
+  WorkerA --> Fixture["Bounded loopback HTML fixture"]
+  WorkerB --> Fixture
+  WorkerA --> Artifacts["Durable task and shuffle files"]
+  WorkerB --> Artifacts
+  Builder --> Snapshot["Atomic completed search snapshot"]
+  Browser["Search browser UI"] --> Coordinator
+  Coordinator --> Snapshot
+```
+
+The builder publishes only after crawling, building an [inverted index](#inverted-index), and both [PageRank](#pagerank) calculations finish. Its [teleport vector](#teleport-vector) also redistributes [dangling mass](#dangling-mass). A failed rebuild leaves the previous [snapshot](#snapshot) available; MapReduce retries use [lease fencing](#lease-fencing).
+
+```mermaid
+flowchart TD
+  subgraph Build["Index build lifecycle"]
+    Seed["Validate same-origin seed"] --> Crawl["Crawl bounded frontier"]
+    Crawl --> Parse{"Valid bounded HTML?"}
+    Parse -->|"Yes"| Pages["Emit page graph and content"]
+    Parse -->|"No"| Fail["Fail build and keep old snapshot"]
+    Pages --> RankInput["Build adjacency and initial ranks"]
+    RankInput --> Global["Iterate global PageRank jobs"]
+    Global --> GlobalDone{"Global delta at most 1e-10?"}
+    GlobalDone -->|"No, fewer than 200 iterations"| Global
+    GlobalDone -->|"Yes, reset ranks for next policy"| Focus["Iterate research-focus jobs"]
+    Focus --> FocusDone{"Topic delta at most 1e-10?"}
+    FocusDone -->|"No, fewer than 200 iterations"| Focus
+    FocusDone -->|"Yes"| Index["Map terms to postings"]
+    Index --> SearchIndex["Join postings and both rank profiles"]
+    SearchIndex --> Publish["Atomically replace snapshot"]
+    GlobalDone -->|"Limit reached"| Fail
+    FocusDone -->|"Limit reached"| Fail
+  end
+  subgraph Query["Search request"]
+    Request["Validate query and policy"] --> Ready{"Snapshot ready?"}
+    Ready -->|"Yes"| Score["Score terms and PageRank"]
+    Score --> Sort["Sort by score then URL"]
+    Ready -->|"No"| Unavailable["Return service unavailable"]
+  end
+```
+
+| Subsystem | Responsibility and owned state | Source |
+|---|---|---|
+| Builder | Submits crawl/index/rank jobs, checks deadlines, assembles snapshot | [`build-index.mjs`](tools/build-index.mjs) |
+| Coordinator | Authenticated job API, task state, search reads and atomic publication | [`coordinator.mjs`](src/coordinator.mjs) |
+| Worker and jobs | Fetch fixture pages and perform map/reduce work | [`worker.mjs`](src/worker.mjs), [`crawl-page.mjs`](jobs/crawl-page.mjs), [`index-document.mjs`](jobs/index-document.mjs), [`rank-contribution.mjs`](jobs/rank-contribution.mjs) |
+| Search API and UI | Validates queries, selects policy, scores stable results, displays errors | [`coordinator.mjs`](src/coordinator.mjs), [`index.html`](web/index.html) |
+| Verification | Drives real processes and compares rank/search with independent expected results | [`features`](features/README.md), [`verify.mjs`](tools/verify.mjs) |
+
+### End-to-end journey
+
+1. Start the loopback fixture, coordinator, and workers with shared token and fixture origin.
+2. Run the builder within the configured page and depth budgets. Defaults allow 32 pages over five levels; invalid responses, redirects, oversize pages, timeouts, or non-HTML fail visibly.
+3. Run repeated jobs for global PageRank, then reset ranks and compute manually seeded research-focus PageRank. Each stops at the L1 threshold or fails after 200 iterations. Map page text into postings after both policies finish.
+4. Atomically replace the snapshot only after the whole build succeeds. A failed build retains its predecessor; coordinator restart reloads the saved snapshot.
+5. Search with the global or topic policy. Results combine term frequency and PageRank, then sort ties by URL. Without a snapshot, the API returns 503.
+
+### Design decisions and tradeoffs
+
+Rationales are inferred from the implementation.
+
+| Choice | Practical reason | Alternative and cost to reconsider |
+|---|---|---|
+| Crawl a same-origin fixture with page and time bounds | Repeatable local inputs and explicit error cases | Crawl arbitrary sites, adding politeness, robots, SSRF, and variable data concerns |
+| Run crawl, index, and rank as MapReduce jobs | Exercises the retained task and recovery API | Monolithic process removes distributed task boundaries |
+| Keep one selected topic seed beside global rank | Shows a manually chosen teleport policy | Learn vectors or many topics, requiring training data and relevance evaluation |
+| Publish a complete snapshot atomically | Readers see old or new complete data | Update files in place and risk partial indexes |
+| Bind the search prototype to loopback | No external-user authentication is implemented | Public binding requires access control and security design |
+
+### Glossary
+
+<a id="inverted-index"></a>
+
+<details><summary>What is an inverted index?</summary>
+
+It maps a term to documents that contain it. Here postings carry term frequency and page data for scoring.
+
+</details>
+
+<a id="pagerank"></a>
+
+<details><summary>What is PageRank?</summary>
+
+It assigns scores from links through repeated updates. This system computes global and one manually seeded profile, capped at 200 iterations.
+
+</details>
+
+<a id="teleport-vector"></a>
+
+<details><summary>What is a teleport vector?</summary>
+
+It distributes rank when the random surfer jumps instead of following a link. Here global rank uses a uniform vector and research rank favors `/ranking`.
+
+</details>
+
+<a id="dangling-mass"></a>
+
+<details><summary>What is dangling mass?</summary>
+
+It is rank on pages with no outgoing links. This implementation redistributes it by the selected profile's teleport vector.
+
+</details>
+
+<a id="snapshot"></a>
+
+<details><summary>What is the search snapshot?</summary>
+
+It is the complete persisted index and rank data served to queries. Atomic replacement leaves the old version intact on failure.
+
+</details>
+
+<a id="lease-fencing"></a>
+
+<details><summary>What is lease fencing?</summary>
+
+It prevents a late worker completion from replacing a newer task attempt. The builder relies on this retained coordinator behavior during retries.
+
+</details>
