@@ -2,6 +2,568 @@
 
 ## Architecture and execution guide
 
+<!-- execution-flow:start -->
+### Execution flow
+
+Start with the primary path, then expand a detailed workflow. Select a numbered node to see its operation, implementation techniques, and source. Solid arrows show the named control, data, or lifecycle handoff; dotted arrows show error paths. Separate entry points are named in each workflow.
+
+<a id="review-walkthrough"></a>
+
+#### Walk through one concrete example
+
+Build a search snapshot from the bounded local fixture site, then query that snapshot through the separate search API.
+
+**Trace.** [Validate build and seed](#flow-step-build-config) → [Collect pages and next frontier](#flow-step-collect-pages) → [Reset global then topic ranks](#flow-step-rank-profile) → [Redistribute dangling mass and test delta](#flow-step-rank-update) → [Count document terms and reduce postings](#flow-step-index-postings) → [Publish complete search snapshot](#flow-step-publish-snapshot).
+
+**Result and boundary.** The builder publishes complete pages, link ranks and inverted postings as one atomic snapshot. Global ranking precedes topic ranking; a failed build does not publish a partial snapshot.
+
+In the separate search API, submit a bounded query against the published snapshot. This is another entry point, not an automatic call from the builder.
+
+**Follow-up trace.** [Load or reuse snapshot by file identity](#flow-step-load-snapshot) → [Validate query after readiness](#flow-step-query-validate) → [Score own-property postings and sort](#flow-step-query-score).
+
+The API loads or reuses the snapshot by file identity, validates the query, scores matching postings and returns sorted results.
+
+<details>
+<summary>Implementation decisions to explain</summary>
+
+**Why crawl one frontier depth at a time and normalize URLs before adding them?** Layered BFS makes depth and page limits explicit, while normalized deduplication prevents fragments or alternate URL spellings from multiplying work. The boundary is same-origin bounded crawling, not an unrestricted web crawler.
+
+[Bounded same-origin breadth-first crawl](#technique-same-origin-bounded-bfs) · [URL normalization and frontier deduplication](#technique-url-normalization-deduplication).
+
+</details>
+
+#### Primary execution flow
+
+The builder CLI waits for each distributed job. The final file is consumed by independently arriving search requests; query arrival is not triggered by publication.
+
+```mermaid
+flowchart TD
+    n1["1. Validate build and seed"]
+    click n1 href "https://github.com/STEVVVU/distributed-web-search#flow-step-build-config" "Open step, techniques, and source" _top
+    n2["2. Submit one breadth-first<br/>layer"]
+    click n2 href "https://github.com/STEVVVU/distributed-web-search#flow-step-crawl-frontier" "Open step, techniques, and source" _top
+    n5["5. Collect pages and next<br/>frontier"]
+    click n5 href "https://github.com/STEVVVU/distributed-web-search#flow-step-collect-pages" "Open step, techniques, and source" _top
+    n6["6. Reset global then topic ranks"]
+    click n6 href "https://github.com/STEVVVU/distributed-web-search#flow-step-rank-profile" "Open step, techniques, and source" _top
+    n7["7. Run rank contribution job"]
+    click n7 href "https://github.com/STEVVVU/distributed-web-search#flow-step-rank-contributions" "Open step, techniques, and source" _top
+    n8["8. Redistribute dangling mass<br/>and test delta"]
+    click n8 href "https://github.com/STEVVVU/distributed-web-search#flow-step-rank-update" "Open step, techniques, and source" _top
+    n9["9. Count document terms and<br/>reduce postings"]
+    click n9 href "https://github.com/STEVVVU/distributed-web-search#flow-step-index-postings" "Open step, techniques, and source" _top
+    n10["10. Publish complete search<br/>snapshot"]
+    click n10 href "https://github.com/STEVVVU/distributed-web-search#flow-step-publish-snapshot" "Open step, techniques, and source" _top
+    n11["11. Fail build before<br/>publication"]
+    click n11 href "https://github.com/STEVVVU/distributed-web-search#flow-step-build-failed" "Open step, techniques, and source" _top
+    n1 -->|"Validated seed initializes frontier"| n2
+    n2 -->|"Await crawl job output before<br/>collecting pages"| n5
+    n5 -->|"Next depth has frontier and page<br/>budget"| n2
+    n5 -->|"Crawl loop ends and graph/topic seed<br/>validate"| n6
+    n6 -->|"Initialize profile then submit rank<br/>job"| n7
+    n7 -->|"Await sums before applying rank update"| n8
+    n8 -->|"Delta remains above tolerance and<br/>iterations below 200"| n7
+    n8 -->|"Global converged; next policy resets<br/>ranks"| n6
+    n8 -->|"Both sequential policy iterations<br/>finish"| n9
+    n9 -->|"Await index output before joining and<br/>atomic write"| n10
+    n2 -.->|"Job failed or deadline expired"| n11
+    n8 -.->|"Convergence assertion fails after 200<br/>iterations"| n11
+```
+
+**Detailed workflows.** [Crawl worker and layered frontier](#flow-workflow-crawl) · [Durable MapReduce scheduling and recovery](#flow-workflow-runtime) · [Snapshot reload and query serving](#flow-workflow-search) · [Independent search verification](#flow-workflow-verification) · [Separate retained-runtime verification](#flow-workflow-runtime-verification) · [Reusable output comparison](#flow-workflow-output-oracle).
+
+<a id="flow-workflow-crawl"></a>
+
+<details>
+<summary>Crawl worker and layered frontier</summary>
+
+Each crawl job uses the runtime workflow below; page parsing happens inside map execution.
+
+```mermaid
+flowchart TD
+    n2["2. Submit one breadth-first<br/>layer"]
+    click n2 href "https://github.com/STEVVVU/distributed-web-search#flow-step-crawl-frontier" "Open step, techniques, and source" _top
+    n3["3. Fetch bounded fixture HTML"]
+    click n3 href "https://github.com/STEVVVU/distributed-web-search#flow-step-crawl-fetch" "Open step, techniques, and source" _top
+    n4["4. Extract text and canonical<br/>links"]
+    click n4 href "https://github.com/STEVVVU/distributed-web-search#flow-step-crawl-parse" "Open step, techniques, and source" _top
+    n5["5. Collect pages and next<br/>frontier"]
+    click n5 href "https://github.com/STEVVVU/distributed-web-search#flow-step-collect-pages" "Open step, techniques, and source" _top
+    n2 -->|"Submitted crawl-page module is<br/>imported and invoked by map worker"| n3
+    n3 -->|"Only a successfully bounded HTML body<br/>reaches parse"| n4
+    n4 -->|"Map result passes through crawl reduce<br/>and awaited job output"| n5
+    n5 -->|"Another permitted depth submits<br/>deduplicated links"| n2
+```
+
+</details>
+
+<a id="flow-workflow-runtime"></a>
+
+<details>
+<summary>Durable MapReduce scheduling and recovery</summary>
+
+Coordinator and workers are separate processes. Claim polling drives lease expiry; no independent lease timer is present.
+
+```mermaid
+flowchart TD
+    n12["12. Acquire exclusive<br/>data-directory ownership"]
+    click n12 href "https://github.com/STEVVVU/distributed-web-search#flow-step-owner" "Open step, techniques, and source" _top
+    n13["13. Reload durable state and<br/>requeue running tasks"]
+    click n13 href "https://github.com/STEVVVU/distributed-web-search#flow-step-recover" "Open step, techniques, and source" _top
+    n14["14. Authenticate and persist<br/>split inputs"]
+    click n14 href "https://github.com/STEVVVU/distributed-web-search#flow-step-admit-job" "Open step, techniques, and source" _top
+    n15["15. Lease a pending task"]
+    click n15 href "https://github.com/STEVVVU/distributed-web-search#flow-step-claim" "Open step, techniques, and source" _top
+    n16["16. Execute map and hash<br/>partitions"]
+    click n16 href "https://github.com/STEVVVU/distributed-web-search#flow-step-map-shuffle" "Open step, techniques, and source" _top
+    n17["17. Fetch accepted maps and<br/>reduce groups"]
+    click n17 href "https://github.com/STEVVVU/distributed-web-search#flow-step-reduce-shuffle" "Open step, techniques, and source" _top
+    n18["18. Persist worker output and<br/>report attempt"]
+    click n18 href "https://github.com/STEVVVU/distributed-web-search#flow-step-complete" "Open step, techniques, and source" _top
+    n19["19. Fence and durably accept<br/>output"]
+    click n19 href "https://github.com/STEVVVU/distributed-web-search#flow-step-accept" "Open step, techniques, and source" _top
+    n20["20. Requeue reported error"]
+    click n20 href "https://github.com/STEVVVU/distributed-web-search#flow-step-retry" "Open step, techniques, and source" _top
+    n21["21. Advance map barrier or<br/>publish job result"]
+    click n21 href "https://github.com/STEVVVU/distributed-web-search#flow-step-barrier" "Open step, techniques, and source" _top
+    n22["22. Return rejection or failed<br/>job"]
+    click n22 href "https://github.com/STEVVVU/distributed-web-search#flow-step-runtime-error" "Open step, techniques, and source" _top
+    n12 -->|"Owner endpoint and owner file acquired<br/>before state reload"| n13
+    n13 -->|"Startup saves recovered state before<br/>HTTP server serves"| n14
+    n14 -->|"Published map job becomes eligible for<br/>worker claims"| n15
+    n15 -->|"Map assignment directs worker into map<br/>branch"| n16
+    n15 -->|"Reduce assignment directs worker into<br/>reduce branch"| n17
+    n16 -->|"Map partitions become local output"| n18
+    n17 -->|"Reduced groups become local output"| n18
+    n18 -->|"POST completion carries<br/>phase/index/token and output"| n19
+    n19 -->|"Attempt persisted and marked done<br/>before advance"| n21
+    n19 -.->|"Current worker error completion<br/>requeues task"| n20
+    n20 -->|"Pending task may receive next token<br/>within attempt budget"| n15
+    n15 -.->|"Four prior attempts fail job rather<br/>than lease again"| n22
+    n19 -.->|"Wrong phase, token or expired lease<br/>returns 409"| n22
+    n21 -->|"All maps done creates pending reducer<br/>task list"| n15
+    n15 -->|"Expired running lease is changed to<br/>pending during a later claim"| n15
+```
+
+</details>
+
+<a id="flow-workflow-search"></a>
+
+<details>
+<summary>Snapshot reload and query serving</summary>
+
+Unauthenticated loopback GET requests independently enter searchSnapshot; status uses the same loader without query scoring.
+
+```mermaid
+flowchart TD
+    n23["23. Load or reuse snapshot by<br/>file identity"]
+    click n23 href "https://github.com/STEVVVU/distributed-web-search#flow-step-load-snapshot" "Open step, techniques, and source" _top
+    n24["24. Validate query after<br/>readiness"]
+    click n24 href "https://github.com/STEVVVU/distributed-web-search#flow-step-query-validate" "Open step, techniques, and source" _top
+    n25["25. Score own-property postings<br/>and sort"]
+    click n25 href "https://github.com/STEVVVU/distributed-web-search#flow-step-query-score" "Open step, techniques, and source" _top
+    n26["26. Return search error"]
+    click n26 href "https://github.com/STEVVVU/distributed-web-search#flow-step-query-error" "Open step, techniques, and source" _top
+    n23 -->|"GET search obtains cached snapshot<br/>then checks readiness"| n24
+    n23 -.->|"Missing snapshot or parse error<br/>reaches shared error response"| n26
+    n24 -->|"Valid terms enter own-property posting<br/>lookup"| n25
+    n24 -.->|"Query bounds or policy validation<br/>throws"| n26
+    n25 -.->|"Selected rank is not finite"| n26
+```
+
+</details>
+
+<a id="flow-workflow-verification"></a>
+
+<details>
+<summary>Independent search verification</summary>
+
+Verification-only CLI drives real local processes, then retains evidence; it is not a production runtime stage.
+
+```mermaid
+flowchart TD
+    n27["27. Drive real search processes"]
+    click n27 href "https://github.com/STEVVVU/distributed-web-search#flow-step-verify-fixture" "Open step, techniques, and source" _top
+    n28["28. Compute independent dense<br/>rank and query oracle"]
+    click n28 href "https://github.com/STEVVVU/distributed-web-search#flow-step-verify-oracle" "Open step, techniques, and source" _top
+    n29["29. Check negative pages,<br/>restart and evidence"]
+    click n29 href "https://github.com/STEVVVU/distributed-web-search#flow-step-verify-restart" "Open step, techniques, and source" _top
+    n27 -->|"Successful builder output is compared<br/>with fixture-only postings and ranks"| n28
+    n28 -->|"After rank/query assertions, test<br/>negative pages and restart"| n29
+```
+
+</details>
+
+<a id="flow-workflow-runtime-verification"></a>
+
+<details>
+<summary>Separate retained-runtime verification</summary>
+
+Independent CLI also executes the older inverted-index document-membership job; it is not the active index-document builder job.
+
+```mermaid
+flowchart TD
+    n30["30. Verify inherited runtime and<br/>alternate index"]
+    click n30 href "https://github.com/STEVVVU/distributed-web-search#flow-step-verify-runtime" "Open step, techniques, and source" _top
+```
+
+</details>
+
+<a id="flow-workflow-output-oracle"></a>
+
+<details>
+<summary>Reusable output comparison</summary>
+
+Independent exported helper, with no invocation from verify-search.
+
+```mermaid
+flowchart TD
+    n31["31. Compare complete search<br/>output recursively"]
+    click n31 href "https://github.com/STEVVVU/distributed-web-search#flow-step-output-compare" "Open step, techniques, and source" _top
+```
+
+</details>
+
+#### Steps, techniques, and source
+
+These source traces cover the active scope below. They explain implementation behavior; benchmark results and their limits remain in the measurement sections.
+
+<a id="flow-step-build-config"></a>
+
+##### 1. Validate build and seed
+
+**Component.** build-index. Require loopback API and owned fixture origin, validate bounded settings and normalize the same-origin seed. Establish per-job and whole-build deadlines.
+
+**Techniques at this step.** [Bounded same-origin breadth-first crawl](#technique-same-origin-bounded-bfs) · [URL normalization and frontier deduplication](#technique-url-normalization-deduplication).
+
+**Source.** [`tools/build-index.mjs:9`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/build-index.mjs#L9). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-crawl-frontier"></a>
+
+##### 2. Submit one breadth-first layer
+
+**Component.** build-index. Deduplicate unseen frontier URLs and truncate to the remaining page budget. Await one crawl-page job before collecting the next depth.
+
+**Techniques at this step.** [Bounded same-origin breadth-first crawl](#technique-same-origin-bounded-bfs) · [URL normalization and frontier deduplication](#technique-url-normalization-deduplication).
+
+**Source.** [`tools/build-index.mjs:31`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/build-index.mjs#L31). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-crawl-fetch"></a>
+
+##### 3. Fetch bounded fixture HTML
+
+**Component.** crawl-page.map. Reject URLs outside the fixture or URL bounds. Fetch without redirects with a two-second timeout, require successful HTML, and cancel the reader on a body error or size beyond 256 KiB.
+
+**Techniques at this step.** [Bounded same-origin breadth-first crawl](#technique-same-origin-bounded-bfs) · [Loopback authentication and request bounds](#technique-loopback-auth-and-resource-bounds).
+
+**Source.** [`jobs/crawl-page.mjs:13`](https://github.com/STEVVVU/distributed-web-search/blob/main/jobs/crawl-page.mjs#L13). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-crawl-parse"></a>
+
+##### 4. Extract text and canonical links
+
+**Component.** crawl-page.map. parse5 repairs and parses HTML. Extract title/body text and same-origin links, drop fragments, discard invalid links, and return unique sorted links.
+
+**Techniques at this step.** [parse5 tree text and link extraction](#technique-parse5-tree-extraction) · [URL normalization and frontier deduplication](#technique-url-normalization-deduplication).
+
+**Source.** [`jobs/crawl-page.mjs:29`](https://github.com/STEVVVU/distributed-web-search/blob/main/jobs/crawl-page.mjs#L29). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-collect-pages"></a>
+
+##### 5. Collect pages and next frontier
+
+**Component.** build-index. Store returned pages and enqueue their links while another depth is allowed. Stop at an empty batch or configured depth, then require pages and a crawled /ranking topic seed.
+
+**Techniques at this step.** [Bounded same-origin breadth-first crawl](#technique-same-origin-bounded-bfs).
+
+**Source.** [`tools/build-index.mjs:36`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/build-index.mjs#L36). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-rank-profile"></a>
+
+##### 6. Reset global then topic ranks
+
+**Component.** build-index. Restrict adjacency to crawled pages. Run policies sequentially, resetting ranks uniformly and selecting uniform or /ranking-only teleport.
+
+**Techniques at this step.** [Sequential global and topic PageRank convergence](#technique-iterative-global-topic-convergence) · [Teleport and dangling-mass redistribution](#technique-teleport-dangling-page-rank).
+
+**Source.** [`tools/build-index.mjs:39`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/build-index.mjs#L39). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-rank-contributions"></a>
+
+##### 7. Run rank contribution job
+
+**Component.** rank-contribution. Submit the current graph through MapReduce. Each linked node emits rank divided by outdegree; reducers sum incoming contributions, while dangling nodes emit no pairs.
+
+**Techniques at this step.** [Sequential global and topic PageRank convergence](#technique-iterative-global-topic-convergence).
+
+**Source.** [`jobs/rank-contribution.mjs:1`](https://github.com/STEVVVU/distributed-web-search/blob/main/jobs/rank-contribution.mjs#L1). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-rank-update"></a>
+
+##### 8. Redistribute dangling mass and test delta
+
+**Component.** build-index. Compute dangling mass before submission and update ranks with damping 0.85 and profile-specific teleport. Continue until L1 delta is at most 1e-10, or fail after 200 iterations.
+
+**Techniques at this step.** [Teleport and dangling-mass redistribution](#technique-teleport-dangling-page-rank) · [Sequential global and topic PageRank convergence](#technique-iterative-global-topic-convergence).
+
+**Source.** [`tools/build-index.mjs:47`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/build-index.mjs#L47). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-index-postings"></a>
+
+##### 9. Count document terms and reduce postings
+
+**Component.** index-document. After both rank policies finish, tokenize title and text into Unicode letter/number terms and count frequency. Reduce by term, deduplicate URLs and sort postings by URL.
+
+**Techniques at this step.** [Term-frequency inverted indexing](#technique-term-frequency-inverted-index).
+
+**Source.** [`jobs/index-document.mjs:1`](https://github.com/STEVVVU/distributed-web-search/blob/main/jobs/index-document.mjs#L1). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-publish-snapshot"></a>
+
+##### 10. Publish complete search snapshot
+
+**Component.** build-index / common.atomic. Join pages, postings and both rank profiles, then atomically write search-snapshot.json using an exclusive temporary file, fsync and rename. Earlier build errors never reach this write.
+
+**Techniques at this step.** [Atomic complete-snapshot publication](#technique-atomic-complete-snapshot).
+
+**Source.** [`tools/build-index.mjs:60`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/build-index.mjs#L60). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-build-failed"></a>
+
+##### 11. Fail build before publication
+
+**Component.** build-index.submit. A failed job or elapsed polling deadline throws; failed convergence and missing graph prerequisites also throw. The builder has no cancellation request for already submitted jobs.
+
+This step records an explicit control boundary or terminal outcome rather than a separate ledger technique.
+
+**Source.** [`tools/build-index.mjs:21`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/build-index.mjs#L21). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-owner"></a>
+
+##### 12. Acquire exclusive data-directory ownership
+
+**Component.** coordinator. Canonicalize the root and bind a platform-specific local owner endpoint before checking owner.json. Reject a live prior owner; only Windows and Linux are supported.
+
+**Techniques at this step.** [Exclusive coordinator ownership](#technique-exclusive-coordinator-ownership).
+
+**Source.** [`src/coordinator.mjs:14`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L14). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-recover"></a>
+
+##### 13. Reload durable state and requeue running tasks
+
+**Component.** coordinator. Load state.json if present, mark persisted running tasks pending and save before serving. Persistence errors terminate the process rather than allowing further requests.
+
+**Techniques at this step.** [Leased retry with accepted-attempt fencing](#technique-lease-retry-attempt-fencing) · [Durable task output before state acceptance](#technique-durable-attempt-publication).
+
+**Source.** [`src/coordinator.mjs:47`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L47). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-admit-job"></a>
+
+##### 14. Authenticate and persist split inputs
+
+**Component.** coordinator HTTP handler. Runtime routes require the configured bearer token. Validate trusted module, finite JSON pairs and partition counts, persist round-robin input splits before publishing the map job state.
+
+**Techniques at this step.** [Loopback authentication and request bounds](#technique-loopback-auth-and-resource-bounds) · [Durable task output before state acceptance](#technique-durable-attempt-publication).
+
+**Source.** [`src/coordinator.mjs:117`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L117). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-claim"></a>
+
+##### 15. Lease a pending task
+
+**Component.** coordinator.claim. At claim time expire elapsed running leases, then assign a fresh token and deadline and persist before returning. The fifth attempted claim after four executions fails the job.
+
+**Techniques at this step.** [Leased retry with accepted-attempt fencing](#technique-lease-retry-attempt-fencing).
+
+**Source.** [`src/coordinator.mjs:67`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L67). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-map-shuffle"></a>
+
+##### 16. Execute map and hash partitions
+
+**Component.** worker. Import the trusted job module, fetch and persist the input, invoke map and validate pairs. SHA256 first-word modulo reducer count selects each partition.
+
+**Techniques at this step.** [Deterministic hash partitioning and shuffle](#technique-deterministic-hash-shuffle).
+
+**Source.** [`src/worker.mjs:14`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/worker.mjs#L14). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-reduce-shuffle"></a>
+
+##### 17. Fetch accepted maps and reduce groups
+
+**Component.** worker. After the map barrier, fetch each accepted map partition over HTTP and save it locally. Group by key, sort keys and invoke the job reducer.
+
+**Techniques at this step.** [Deterministic hash partitioning and shuffle](#technique-deterministic-hash-shuffle).
+
+**Source.** [`src/worker.mjs:22`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/worker.mjs#L22). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-complete"></a>
+
+##### 18. Persist worker output and report attempt
+
+**Component.** worker. Atomically save local output before posting completion. Non-HTTP execution errors are reported to the coordinator as bounded error strings; other failures are logged before polling resumes.
+
+**Techniques at this step.** [Durable task output before state acceptance](#technique-durable-attempt-publication).
+
+**Source.** [`src/worker.mjs:31`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/worker.mjs#L31). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-accept"></a>
+
+##### 19. Fence and durably accept output
+
+**Component.** coordinator completion route. Return duplicate success for the accepted token. Otherwise require matching live phase, running token and unexpired lease, validate output partitions or reduced keys, persist the attempt before marking it done, advancing and saving state.
+
+**Techniques at this step.** [Leased retry with accepted-attempt fencing](#technique-lease-retry-attempt-fencing) · [Durable task output before state acceptance](#technique-durable-attempt-publication).
+
+**Source.** [`src/coordinator.mjs:158`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L158). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-retry"></a>
+
+##### 20. Requeue reported error
+
+**Component.** coordinator completion route. A valid current error completion sets the task pending and saves an error event. Retry assignment still consumes the shared four-attempt budget.
+
+**Techniques at this step.** [Leased retry with accepted-attempt fencing](#technique-lease-retry-attempt-fencing).
+
+**Source.** [`src/coordinator.mjs:161`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L161). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-barrier"></a>
+
+##### 21. Advance map barrier or publish job result
+
+**Component.** coordinator.advance. All maps done replaces the active task list with reducers. All reducers done reads accepted attempt artifacts, sorts keys and persists the result before marking the job done.
+
+**Techniques at this step.** [Durable task output before state acceptance](#technique-durable-attempt-publication).
+
+**Source.** [`src/coordinator.mjs:57`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L57). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-runtime-error"></a>
+
+##### 22. Return rejection or failed job
+
+**Component.** coordinator. Stale completions return 409 and invalid runtime requests return their validation status. Exhausted tasks mark the job failed; persistence failure exits the coordinator.
+
+**Techniques at this step.** [Leased retry with accepted-attempt fencing](#technique-lease-retry-attempt-fencing) · [Loopback authentication and request bounds](#technique-loopback-auth-and-resource-bounds).
+
+**Source.** [`src/coordinator.mjs:160`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L160). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-load-snapshot"></a>
+
+##### 23. Load or reuse snapshot by file identity
+
+**Component.** coordinator.searchSnapshot. Stat dev, inode, size and nanosecond modification/change times. Reuse unchanged parsed data and first-URL document map; clear cache on removal or before reading a replacement, so corrupt reads remain visible.
+
+**Techniques at this step.** [File-identity cached snapshot reload](#technique-file-identity-cache-reload).
+
+**Source.** [`src/coordinator.mjs:37`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L37). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-query-validate"></a>
+
+##### 24. Validate query after readiness
+
+**Component.** coordinator /api/search. Search loads the snapshot first and returns 503 if absent. Then enforce at most 512 characters, valid global/topic policy and at most 16 distinct Unicode terms.
+
+**Techniques at this step.** [Query validation and stable result ordering](#technique-bounded-query-validation-stable-ranking).
+
+**Source.** [`src/coordinator.mjs:93`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L93). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-query-score"></a>
+
+##### 25. Score own-property postings and sort
+
+**Component.** coordinator /api/search. For each distinct term, use own-property lookup and sum tf times ln(1+N/df). Add selected finite rank, produce snippet, and sort descending score then URL before JSON response.
+
+**Techniques at this step.** [Query validation and stable result ordering](#technique-bounded-query-validation-stable-ranking).
+
+**Source.** [`src/coordinator.mjs:103`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L103). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-query-error"></a>
+
+##### 26. Return search error
+
+**Component.** coordinator HTTP handler. Missing snapshot or unavailable rank returns 503; invalid query returns 400. Snapshot parsing errors reach the shared JSON error response as 500.
+
+This step records an explicit control boundary or terminal outcome rather than a separate ledger technique.
+
+**Source.** [`src/coordinator.mjs:181`](https://github.com/STEVVVU/distributed-web-search/blob/main/src/coordinator.mjs#L181). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-verify-fixture"></a>
+
+##### 27. Drive real search processes
+
+**Component.** verify-search. Verification starts owned fixture, coordinator and workers, proves missing-index and no-worker failure, then builds the real snapshot and compares every parsed fixture page and posting.
+
+**Techniques at this step.** [Independent search-output oracle](#technique-independent-search-oracle).
+
+**Source.** [`tools/verify-search.mjs:32`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/verify-search.mjs#L32). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-verify-oracle"></a>
+
+##### 28. Compute independent dense rank and query oracle
+
+**Component.** verify-search. Construct dense transition matrices from fixture-only links and iterate to 1e-14. Compare both rank profiles and independently computed query scores/order, including prototype terms, bounds and empty queries.
+
+**Techniques at this step.** [Independent search-output oracle](#technique-independent-search-oracle).
+
+**Source.** [`tools/verify-search.mjs:60`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/verify-search.mjs#L60). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-verify-restart"></a>
+
+##### 29. Check negative pages, restart and evidence
+
+**Component.** verify-search. Submit negative crawl jobs and verify old snapshot bytes remain unchanged. Stop workers, restart coordinator, compare retained results, then clean owned children and retain passed or failed evidence.
+
+**Techniques at this step.** [Independent search-output oracle](#technique-independent-search-oracle).
+
+**Source.** [`tools/verify-search.mjs:105`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/verify-search.mjs#L105). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-verify-runtime"></a>
+
+##### 30. Verify inherited runtime and alternate index
+
+**Component.** tools/verify. The separate runtime verifier submits the retained inverted-index job and compares document membership with a local oracle. It also drives bounded failure, killed worker, concurrent ownership recovery, stale tokens and durable accepted artifacts.
+
+**Techniques at this step.** [Independent search-output oracle](#technique-independent-search-oracle) · [Term-frequency inverted indexing](#technique-term-frequency-inverted-index).
+
+**Source.** [`tools/verify.mjs:79`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/verify.mjs#L79). [Back to execution flow](#execution-flow).
+
+<a id="flow-step-output-compare"></a>
+
+##### 31. Compare complete search output recursively
+
+**Component.** search-output-oracle.sameSearchOutput. This separately exported oracle checks equal object key sets and recursively compares fields, with finite numeric tolerance below 2e-10. It is not invoked by verify-search and has no runtime handoff to that driver.
+
+**Techniques at this step.** [Independent search-output oracle](#technique-independent-search-oracle).
+
+**Source.** [`tools/search-output-oracle.mjs:1`](https://github.com/STEVVVU/distributed-web-search/blob/main/tools/search-output-oracle.mjs#L1). [Back to execution flow](#execution-flow).
+
+<details>
+<summary>Scope and subsystem coverage</summary>
+
+Active synthetic loopback crawl, parse and index jobs, MapReduce coordinator and worker lifecycle, ranking and publication, query service, and the underlying ownership, leasing, durability, and fencing mechanisms used by those paths.
+
+- **Crawl frontier and HTML parsing.** Mapped to the actual operations and independent workflows described above. [Step 2](#flow-step-crawl-frontier), [Step 3](#flow-step-crawl-fetch), [Step 4](#flow-step-crawl-parse), [Step 5](#flow-step-collect-pages).
+- **MapReduce indexing and shuffle.** Mapped to the actual operations and independent workflows described above. [Step 16](#flow-step-map-shuffle), [Step 17](#flow-step-reduce-shuffle), [Step 9](#flow-step-index-postings), [Step 30](#flow-step-verify-runtime).
+- **PageRank profiles.** Mapped to the actual operations and independent workflows described above. [Step 6](#flow-step-rank-profile), [Step 7](#flow-step-rank-contributions), [Step 8](#flow-step-rank-update).
+- **Snapshot durability and reload.** Mapped to the actual operations and independent workflows described above. [Step 10](#flow-step-publish-snapshot), [Step 23](#flow-step-load-snapshot).
+- **Task ownership and recovery.** Mapped to the actual operations and independent workflows described above. [Step 12](#flow-step-owner), [Step 13](#flow-step-recover), [Step 15](#flow-step-claim), [Step 19](#flow-step-accept), [Step 20](#flow-step-retry), [Step 21](#flow-step-barrier), [Step 18](#flow-step-complete).
+- **Query and service boundaries.** Mapped to the actual operations and independent workflows described above. [Step 14](#flow-step-admit-job), [Step 24](#flow-step-query-validate), [Step 25](#flow-step-query-score), [Step 26](#flow-step-query-error), [Step 27](#flow-step-verify-fixture), [Step 28](#flow-step-verify-oracle), [Step 29](#flow-step-verify-restart), [Step 31](#flow-step-output-compare).
+
+Outside this flow audit:
+
+- `jobs/wordcount.mjs`. Preserved upstream example job, not used by the active search build.
+- `jobs/max-temperature.mjs`. Preserved upstream example job, not used by the active search build.
+- `jobs/delayed-count.mjs`. Preserved upstream example job, not used by the active search build.
+- `web/index.html`. Search UI presentation path is outside the requested active algorithm/runtime technique scope.
+
+</details>
+
+<!-- execution-flow:end -->
+
+<details>
+<summary>Subsystem technique index</summary>
+
 ### Subsystem map
 
 Select a subsystem in the diagram to open its techniques, tradeoffs, and code references. The numbered links provide the same navigation. This map groups components; the execution diagrams show their runtime flow.
@@ -33,6 +595,8 @@ flowchart LR
 This project adds a bounded synthetic-web crawl, inverted index, two PageRank policies, snapshot publication, and a search UI on the existing MIT MapReduce runtime. The runtime owns job scheduling, worker leases, durable task output, and recovery. This is not a general web crawler or multi-host service. The [snapshot](#snapshot) is the committed input to search.
 
 The builder submits named jobs to one coordinator; separate workers run them and persist artifacts. The coordinator serves queries over the completed snapshot.
+
+</details>
 
 <details>
 <summary>Expand flow diagram 1</summary>
